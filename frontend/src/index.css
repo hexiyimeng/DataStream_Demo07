@@ -1,0 +1,166 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ==== ☀️ 亮色模式 (Light Mode) ==== */
+    --bg-canvas: #f0f2f5;
+    --bg-grid-minor: #e2e8f0;
+    --bg-grid-major: #cbd5e1;
+
+    --node-header: #ffffff;
+    --node-body: #f8fafc;
+    --node-border: #cbd5e1;
+
+    --widget-bg: #e2e8f0;
+    --widget-hover: #cbd5e1;
+
+    --text-head: #1e293b;
+    --text-label: #64748b;
+    --text-val: #0f172a;
+    --text-sub: #94a3b8;
+
+    --edge-stroke: #94a3b8;
+
+    /* 控制台配色 (亮色) */
+    --console-bg: #ffffff;
+    --console-border: #e2e8f0;
+    --console-text: #334155;
+    --console-info: #0ea5e9;
+  }
+
+  .dark {
+    /* ==== 🌙 深色模式 (ComfyUI Style) ==== */
+    --bg-canvas: #202020;
+    --bg-grid-minor: #2a2a2a;
+    --bg-grid-major: #000000;
+
+    --node-header: #353535;
+    --node-body: #3b3b3b;
+    --node-border: #2a2a2a;
+
+    --widget-bg: #222;
+    --widget-hover: #333;
+
+    --text-head: #eee;
+    --text-label: #aaa;
+    --text-val: #fff;
+    --text-sub: #777;
+
+    --edge-stroke: #777;
+
+    /* 控制台配色 (深色) - 极黑 */
+    --console-bg: #0f0f0f;
+    --console-border: #333333;
+    --console-text: #cccccc;
+    --console-info: #60a5fa;
+  }
+}
+
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-head);
+  font-family: 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+  transition: background-color 0.2s;
+}
+
+/* === React Flow Overrides === */
+
+/* 1. Handle (连接点) */
+.react-flow__handle {
+  border-radius: 50%;
+  border: none !important;
+  box-shadow: 0 0 2px rgba(0,0,0,0.8);
+}
+.react-flow__handle:hover {
+  box-shadow: 0 0 0 2px white;
+}
+
+/* 2. Edge (连线) */
+.react-flow__edge-path {
+  stroke: var(--edge-stroke) !important;
+  opacity: 0.7;
+  stroke-width: 2px;
+}
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: #fff !important;
+  opacity: 1;
+  stroke-width: 3px !important;
+}
+
+/* 3. Node Selection (选中框) */
+.react-flow__node.selected .node-wrapper {
+  border: 1px solid #fff !important;
+}
+.react-flow__node.selected {
+  outline: none !important;
+}
+
+/* === ComfyUI 风格鼠标交互 (强制箭头) === */
+/* 核心原理：覆盖 React Flow 默认的 grab/grabbing 光标 */
+
+/* 画布默认状态 */
+.react-flow__pane {
+  cursor: default !important;
+}
+
+/* 当按住鼠标进行平移时，强制保持箭头，不要变成抓手 */
+.react-flow__pane.panning,
+.react-flow__viewport.panning {
+  cursor: default !important;
+}
+
+/* 节点默认可以拖拽，鼠标放上去是移动图标 */
+.react-flow__node {
+    cursor: move;
+}
+
+/* === MiniMap 样式增强 (显示连线) === */
+
+/* 小地图背景 */
+.react-flow__minimap {
+  background-color: var(--bg-canvas) !important;
+}
+
+/* 小地图节点颜色 (虽然JS里设置了，这里兜底) */
+.react-flow__minimap-node {
+  fill: #3b82f6 !important;
+  stroke: none;
+}
+
+/* 【关键新增】小地图连线颜色 */
+.react-flow__minimap-edge {
+  stroke: var(--edge-stroke) !important;
+  stroke-width: 2px;
+  opacity: 0.6;
+}
+
+/* 隐藏 type="number" 的默认箭头 */
+.no-spinners::-webkit-inner-spin-button,
+.no-spinners::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* src/index.css */
+
+/* 自定义滚动条 - 仿 ComfyUI 风格 */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px; /* 稍微宽一点，方便点击 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: #1a1a1a; /* 轨道极深色 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: #444; /* 滚动条深灰色 */
+  border-radius: 4px;
+  border: 2px solid #1a1a1a; /* 给个边框让它看起来像悬浮在中间 */
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: #666; /* 悬停变亮 */
+}
