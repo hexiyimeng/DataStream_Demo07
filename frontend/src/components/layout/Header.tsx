@@ -93,7 +93,7 @@ export default function Header() {
               const bounds = getNodesBounds(flow.nodes);
               // 注意：如果 bounds 无效(比如节点还没渲染)，viewport 可能会计算出 NaN
               if (bounds && bounds.width > 0) {
-                 const { x, y, zoom } = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2);
+                 const { x, y, zoom } = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
                  reactFlowInstance.setViewport({ x, y, zoom });
               }
           }, 0);

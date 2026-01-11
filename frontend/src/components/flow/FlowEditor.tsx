@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+// React 基础 hooks 和类型定义
+import { useState, useCallback, type ComponentType } from 'react';
 import {
   ReactFlow,
   Background,
@@ -18,7 +19,9 @@ import ContextMenu from './ContextMenu'; // 【新增】
 
 
 
-const nodeTypes: NodeTypes = { dynamic: DynamicNode };
+// 注册动态节点组件到 React Flow
+// 将 DynamicNode 转换为 ComponentType<any> 类型以兼容 React Flow 的节点类型要求
+const nodeTypes: NodeTypes = { dynamic: DynamicNode as ComponentType<any> };
 
 // ... (FitIcon, MapIcon 等图标组件保持不变)
 const FitIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>;
@@ -49,12 +52,19 @@ function BottomToolbar() {
   );
 }
 
+
+// 主要的工作流编辑器组件，提供可视化节点编辑界面
 export default function FlowEditor() {
   const { nodes, edges, onNodesChange, onEdgesChange, onConnect, theme, isConsoleOpen, addNodeAt ,isValidConnection} = useFlow();
 
   // 获取 React Flow 实例用于坐标转换
   const { screenToFlowPosition } = useReactFlow();
 
+  // 定义连线时的样式
+  const connectionLineStyle = {
+    stroke: '#fff',
+    strokeWidth: 3,
+  };
   // 菜单状态
   const [menu, setMenu] = useState<{ x: number, y: number, flowPos: {x:number, y:number} } | null>(null);
 
@@ -77,7 +87,11 @@ export default function FlowEditor() {
 
   const onPaneClick = useCallback(() => setMenu(null), []);
 
-  const defaultEdgeOptions = { type: 'default', animated: false, style: { strokeWidth: 2 } };
+  const defaultEdgeOptions = {
+    type: 'default',
+    animated: true,
+    style: { strokeWidth: 3, stroke: '#555' }
+};
 
 
 
@@ -93,6 +107,8 @@ export default function FlowEditor() {
         connectionMode={ConnectionMode.Loose}
         defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
         isValidConnection={isValidConnection}
+        connectionLineStyle={connectionLineStyle}
+        selectNodesOnDrag={false}
         panOnScroll={true} zoomOnScroll={true} panOnDrag={[0, 1, 2]} selectionOnDrag={false}
         minZoom={0.1} maxZoom={3}
         colorMode={theme === 'dark' ? 'dark' : 'light'}

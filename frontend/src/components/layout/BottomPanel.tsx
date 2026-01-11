@@ -6,7 +6,7 @@ export default function BottomPanel() {
   const { logs, clearLogs, isConsoleOpen, toggleConsole } = useFlow();
   const endRef = useRef<HTMLDivElement>(null);
 
-  // 🔥 新增：高度状态 + 拖拽逻辑
+  // 高度状态 + 拖拽逻辑
   const [height, setHeight] = useState(192); // 默认高度 (h-48 = 192px)
   const isDragging = useRef(false);
 
@@ -62,10 +62,10 @@ export default function BottomPanel() {
         bg-[var(--console-bg)] text-[var(--console-text)]
         shadow-[0_-4px_20px_rgba(0,0,0,0.1)]
       `}
-      // 🔥 动态样式：如果打开就用 state 高度，否则固定 32px (h-8)
+      // 动态样式：如果打开就用 state 高度，否则固定 32px (h-8)
       style={{ height: isConsoleOpen ? height : 32 }}
     >
-      {/* 🔥 拖拽手柄 (仅在打开时可用) */}
+      {/* 拖拽手柄 (仅在打开时可用) */}
       {isConsoleOpen && (
         <div
             onMouseDown={startResizing}

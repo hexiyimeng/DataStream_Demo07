@@ -8,57 +8,97 @@ from registry import NODE_CLASS_MAPPINGS
 
 
 # ==========================================
-# 1. 参数校验与默认值填充 (逻辑不变)
+# 1. 参数校验与默认值填充 (已修复 Dask Array 比较报错)
 # ==========================================
-def validate_and_prepare_inputs(node_cls, raw_inputs):
+def validate_and_prepare_inputs(node_cls, raw_inputs, node_id="Unknown"):
+    """
+    校验输入参数，补充默认值，并对必填项进行强制检查。
+    """
     final_inputs = {}
     if hasattr(node_cls, "INPUT_TYPES"):
         input_defs = node_cls.INPUT_TYPES()
     else:
         input_defs = {"required": {}, "optional": {}}
 
-    all_defs = {**input_defs.get("required", {}), **input_defs.get("optional", {})}
-
-    for name, config in all_defs.items():
+    # 1. 必填项 (Required) - 必须有值，否则报错！
+    required_defs = input_defs.get("required", {})
+    for name, config in required_defs.items():
         val = raw_inputs.get(name)
         input_type = config[0]
-        meta = {}
-        if len(config) > 1 and isinstance(config[1], dict):
-            meta = config[1]
+        meta = config[1] if len(config) > 1 and isinstance(config[1], dict) else {}
 
+        # 🔥🔥🔥【修复点 1】安全检查空值
+        # 不能直接写 val == ""，因为如果 val 是 Array 会报错
+        is_empty = False
         if val is None:
+            is_empty = True
+        elif isinstance(val, str) and val == "":
+            is_empty = True
+
+        # 尝试使用默认值
+        if is_empty:
             if "default" in meta:
                 val = meta["default"]
             elif isinstance(input_type, list) and len(input_type) > 0:
                 val = input_type[0]
 
-        if val is not None:
-            if input_type == "INT":
-                try:
-                    val = int(val)
-                except:
-                    pass
-            elif input_type == "FLOAT":
-                try:
-                    val = float(val)
-                except:
-                    pass
+        # 🔥🔥🔥【修复点 2】再次安全检查
+        # 经过默认值填充后，如果还是空的，且类型是 STRING，才报错
+        # 这样 Dask Array (非字符串) 就不会触发这个检查
+        is_still_empty = False
+        if val is None:
+            is_still_empty = True
+        elif isinstance(val, str) and val == "":
+            is_still_empty = True
+
+        if is_still_empty and input_type == "STRING":
+            raise ValueError(f"❌ 节点错误: 必填项 '{name}' 不能为空！")
 
         final_inputs[name] = val
+
+    # 2. 选填项 (Optional) - 可以为空
+    optional_defs = input_defs.get("optional", {})
+    for name, config in optional_defs.items():
+        val = raw_inputs.get(name)
+        meta = config[1] if len(config) > 1 and isinstance(config[1], dict) else {}
+
+        if val is None:
+            if "default" in meta:
+                val = meta["default"]
+
+        final_inputs[name] = val
+
+    # 3. 类型转换 (通用)
+    for name, val in final_inputs.items():
+        if val is not None:
+            if isinstance(val, (str, int, float)):  # 简单类型转换
+                # 重新获取 definition 确认类型
+                def_info = required_defs.get(name) or optional_defs.get(name)
+                if def_info:
+                    def_type = def_info[0]
+                    if def_type == "INT":
+                        try:
+                            final_inputs[name] = int(val)
+                        except:
+                            pass
+                    elif def_type == "FLOAT":
+                        try:
+                            final_inputs[name] = float(val)
+                        except:
+                            pass
+
     return final_inputs
 
 
 # ==========================================
-# 2. 纯净监控 (删除了所有 Dask Dashboard 代码)
+# 2. 纯净监控
 # ==========================================
 async def run_system_monitor(websocket):
-    # 🔥 彻底移除 Client 启动代码，防止端口冲突报错
     try:
         while True:
             mem = psutil.virtual_memory()
             cpu = psutil.cpu_percent()
             msg = f"🖥️ [System] RAM: {mem.percent}% | CPU: {cpu}%"
-            # 发送日志
             await websocket.send_json({"type": "log", "message": msg})
             await asyncio.sleep(2)
     except asyncio.CancelledError:
@@ -100,8 +140,8 @@ async def execute_graph(graph: dict, websocket):
 
         try:
             NodeCls = NODE_CLASS_MAPPINGS[class_name]
-            # 参数补全
-            func_args = validate_and_prepare_inputs(NodeCls, raw_inputs)
+            # 🔥 传入 node_id 方便报错
+            func_args = validate_and_prepare_inputs(NodeCls, raw_inputs, node_id)
 
             instance = NodeCls()
             method_name = getattr(NodeCls, "FUNCTION", "execute")
@@ -120,7 +160,6 @@ async def execute_graph(graph: dict, websocket):
                 output = await method(**valid_args)
             else:
                 loop = asyncio.get_running_loop()
-                # 本地模式下，Callback 会在这里正常工作
                 output = await loop.run_in_executor(None, functools.partial(method, **valid_args))
 
             print(f"✅ [Debug] 完成: {class_name}", flush=True)

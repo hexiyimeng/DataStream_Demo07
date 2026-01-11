@@ -1,5 +1,6 @@
 # nodes/ome_zarr_flow.py
 import os
+import shutil  # 用于强制删除旧文件夹
 import asyncio
 import numpy as np
 import warnings
@@ -20,18 +21,11 @@ except ImportError:
 
 
 # ==========================================
-#      Dask 进度条桥接器 (核心组件)
+#      Dask 进度条桥接器 (静音版)
 # ==========================================
-
 class DaskProgressBridge(Callback):
-    """
-    监听 Dask 任务进度，并通过 asyncio 桥接到 ComfyUI 前端
-    """
-
-    # 🔥 修复点 1：增加 loop 参数，允许从外部传入主线程的事件循环
     def __init__(self, async_callback, loop=None):
         self.async_callback = async_callback
-        # 如果传入了 loop 就用传入的，否则尝试获取（在子线程会失败，所以必须传入）
         self.loop = loop or asyncio.get_running_loop()
         self.total_tasks = 0
         self.finished_tasks = 0
@@ -44,16 +38,14 @@ class DaskProgressBridge(Callback):
         self.finished_tasks += 1
         if self.total_tasks > 0:
             progress = int((self.finished_tasks / self.total_tasks) * 100)
-            # 只有当进度变化明显时才发送，避免 WebSocket 拥堵
             if self.finished_tasks % 5 == 0 or progress == 100:
-                self._send(progress, f"Computing... {progress}%")
+                self._send(progress, "")
 
     def _finish(self, dsk, state, errored):
         self._send(100, "✅ 完成")
 
     def _send(self, progress, msg):
         if self.async_callback:
-            # 使用保存的 loop 线程安全地发送消息
             asyncio.run_coroutine_threadsafe(
                 self.async_callback(progress, 100, msg), self.loop
             )
@@ -63,7 +55,6 @@ class DaskProgressBridge(Callback):
 #              ComfyUI 节点定义
 # ==========================================
 
-# --- 节点 1: Reader ---
 @register_node("OMEZarrReader")
 class OMEZarrReader:
     CATEGORY = "BrainFlow/IO"
@@ -71,70 +62,76 @@ class OMEZarrReader:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"file_path": ("STRING", {"default": "", "multiline": False})}}
+        return {
+            "required": {
+                "file_path": ("STRING", {"default": "", "multiline": False}),
+                # 保留用户要求的功能：控制块大小倍数
+                "chunk_multiple": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1, "label": "Chunk Multiplier"}),
+            }
+        }
 
     RETURN_TYPES = ("DASK_ARRAY", "DICT")
     RETURN_NAMES = ("dask_arr", "metadata")
     FUNCTION = "load_zarr"
 
-    def load_zarr(self, file_path):
+    def load_zarr(self, file_path, chunk_multiple=1):
+        # 1. 强制转绝对路径
+        if not file_path:
+            raise ValueError("❌ 文件路径不能为空")
+
+        file_path = os.path.abspath(file_path.strip())
+
         print(f" [Reader] 读取: {file_path}")
         if not HAS_LIBS or not os.path.exists(file_path):
-            return self._get_mock()
+            raise FileNotFoundError(f"❌ 找不到文件: {file_path}")
 
         try:
-            # 1. 智能探测路径
             store = zarr.open(file_path, mode='r')
             array_path = None
 
+            # 智能探测
             if isinstance(store, zarr.Group):
-                print("   > 识别为 Group，正在寻找 Multiscales 元数据...")
                 attrs = store.attrs.asdict()
-                if 'multiscales' in attrs and len(attrs['multiscales']) > 0:
-                    datasets = attrs['multiscales'][0]['datasets']
-                    found_path = datasets[0]['path']
-                    print(f"   > 🎯 命中 OME 元数据，路径: '{found_path}'")
-                    array_path = found_path
+                if 'multiscales' in attrs:
+                    array_path = attrs['multiscales'][0]['datasets'][0]['path']
                 else:
-                    print("   > ⚠️ 无 Multiscales，尝试暴力搜索数组...")
                     arrays = list(store.array_keys())
                     if arrays:
                         array_path = arrays[0]
                     elif '0' in store:
                         array_path = '0'
 
-            # 2. Dask 读取
             if array_path:
-                dask_arr = da.from_zarr(file_path, component=array_path)
+                z_arr = store[array_path]
             else:
-                dask_arr = da.from_zarr(file_path)
+                z_arr = store
 
-            # 3. 数据类型修复 (防止 Big-Endian 死锁)
-            if dask_arr.dtype.byteorder == '>':
-                print(f"   > ⚠️ 检测到 Big-Endian ({dask_arr.dtype})，正在转码...")
+            native_chunks = z_arr.chunks
+            print(f"   > 📊 原始物理块大小: {native_chunks}")
+
+            if chunk_multiple < 1: chunk_multiple = 1
+            new_chunks = tuple(c * chunk_multiple for c in native_chunks)
+            print(f"   > 🚀 设定 Dask 调度块: {new_chunks} (倍数: {chunk_multiple}x)")
+
+            if array_path:
+                dask_arr = da.from_zarr(file_path, component=array_path, chunks=new_chunks)
+            else:
+                dask_arr = da.from_zarr(file_path, chunks=new_chunks)
+
             dask_arr = dask_arr.astype(np.float32)
 
-            print(f"   > ✅ Dask 加载成功: Shape={dask_arr.shape}, Chunks={dask_arr.chunksize}")
-
-            metadata = {
-                "source_path": os.path.abspath(file_path),
+            return (dask_arr, {
+                "source_path": file_path,  # 传递绝对路径
                 "shape": dask_arr.shape,
-                "dtype": str(dask_arr.dtype)
-            }
-            return (dask_arr, metadata)
+                "dtype": str(dask_arr.dtype),
+                "chunks": new_chunks
+            })
 
         except Exception as e:
             print(f"❌ 读取失败: {e}")
-            import traceback
-            traceback.print_exc()
             raise e
 
-    def _get_mock(self):
-        arr = da.random.randint(0, 255, size=(10, 512, 512), chunks=(1, 256, 256)).astype(np.float32)
-        return (arr, {"source_path": "mock"})
 
-
-# --- 节点 2: Filter ---
 @register_node("OMEZarrFilter")
 class OMEZarrFilter:
     CATEGORY = "BrainFlow/Process"
@@ -170,11 +167,6 @@ class OMEZarrFilter:
         return (res,)
 
 
-# --- 节点 3: Writer (修复 Loop 传递) ---
-# nodes/ome_zarr_flow.py (只替换 Writer 部分)
-
-# nodes/ome_zarr_flow.py 中的 Writer 部分
-
 @register_node("OMEZarrWriter")
 class OMEZarrWriter:
     CATEGORY = "BrainFlow/IO"
@@ -188,13 +180,10 @@ class OMEZarrWriter:
                 "dask_arr": ("DASK_ARRAY",),
                 "metadata": ("DICT",),
                 "compression": (["default", "zstd"],),
-
-                # 🔥🔥🔥 【关键修复】挪到 required 里，否则前端看不见！
-                # 虽然在 required 里，但给了默认值 ""，所以逻辑上依然是选填的
-                "output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "留空=自动保存在上一级"}),
             },
-            # optional 暂时留空，防止前端渲染不出
-            "optional": {}
+            "optional": {
+                "output_path": ("STRING", {"default": "", "multiline": False, "placeholder": "默认自动保存"})
+            }
         }
 
     RETURN_TYPES = ("STRING",)
@@ -202,61 +191,79 @@ class OMEZarrWriter:
     FUNCTION = "save_zarr"
 
     async def save_zarr(self, dask_arr, metadata, compression, output_path="", callback=None):
-        # 1. 智能路径计算逻辑
-        # 注意：这里要做个 strip() 判断，防止用户输入了空格
-        if not output_path or not output_path.strip():
-            # 获取源文件路径
+        if metadata is None: metadata = {}
+
+        # 1. 自动路径逻辑
+        if not output_path or output_path.strip() == "":
             source = metadata.get("source_path", "")
 
             if source and "mock://" not in source:
-                base_name = os.path.basename(source.rstrip("/\\"))
-                name_only = os.path.splitext(base_name)[0]
+                # 🔥🔥🔥【智能路径修正】
+                # 目标：找到输入文件所属的“根目录”，并存到它的旁边
 
-                # 获取上一级目录
-                current_dir = os.path.dirname(source.rstrip("/\\"))
-                parent_dir = os.path.dirname(current_dir)
+                # 场景 1: 输入是 .../MyImage.zarr/image (OME-Zarr)
+                lower_source = source.lower()
+                if ".zarr" in lower_source:
+                    # 截取到 .zarr 结尾
+                    # 例子: E:\Data\File.zarr\image -> E:\Data\File.zarr
+                    zarr_end_idx = lower_source.rfind(".zarr") + 5
+                    zarr_root = source[:zarr_end_idx]
 
-                # 拼接新路径
+                    # 获取父级: E:\Data
+                    parent_dir = os.path.dirname(zarr_root)
+
+                    # 获取名字: File
+                    base_name = os.path.basename(zarr_root)
+                    name_only = os.path.splitext(base_name)[0]
+
+                # 场景 2: 输入是普通文件夹
+                else:
+                    source_clean = source.rstrip("/\\")
+                    parent_dir = os.path.dirname(source_clean)
+                    base_name = os.path.basename(source_clean)
+                    name_only = os.path.splitext(base_name)[0]
+
+                # 结果: E:\Data\File_processed.zarr
                 output_path = os.path.join(parent_dir, f"{name_only}_processed.zarr")
-                print(f"[Writer] 自动定位上一级目录: {output_path}")
+                print(f"[Writer] 自动定位原始目录: {output_path}")
+
             else:
+                # 兜底：如果完全没有 source 信息，才用代码目录
                 output_path = "output_processed.zarr"
 
         abs_path = os.path.abspath(output_path)
-        print(f"[Writer] 最终写入路径: {abs_path}")
+        print(f"[Writer] 写入路径: {abs_path}")
 
         main_loop = asyncio.get_running_loop()
 
         def run_dask():
-            # 确保 DaskProgressBridge 类可用
+            import numcodecs
+            import shutil
+
+            # 写入前强制清理 (保留用户功能)
+            if os.path.exists(abs_path):
+                try:
+                    shutil.rmtree(abs_path)
+                except Exception as e:
+                    print(f"[Writer] ⚠️ 无法清理旧文件: {e}")
+
             with DaskProgressBridge(callback, loop=main_loop):
                 compressor = None
                 if compression == "zstd":
-                    compressor = numcodecs.Zstd(level=3)
+                    compressor = numcodecs.Blosc(cname='zstd', clevel=5, shuffle=numcodecs.Blosc.BITSHUFFLE)
+                else:
+                    compressor = numcodecs.Blosc(cname='lz4', clevel=5, shuffle=numcodecs.Blosc.SHUFFLE)
 
-                dask_arr.to_zarr(
-                    abs_path,
-                    compressor=compressor,
-                    overwrite=True
-                )
+                dask_arr.to_zarr(abs_path, compressor=compressor, overwrite=True)
 
-                # 写元数据
                 try:
                     z = zarr.open(abs_path, mode='r+')
-                    multiscales = [{
-                        "version": "0.4",
-                        "name": "processed",
-                        "datasets": [{"path": "0"}],
-                        "axes": metadata.get("axes", [
-                            {"name": "t", "type": "time"},
-                            {"name": "c", "type": "channel"},
-                            {"name": "z", "type": "space"},
-                            {"name": "y", "type": "space"},
-                            {"name": "x", "type": "space"}
-                        ])
+                    z.attrs["multiscales"] = [{
+                        "version": "0.4", "name": "processed", "datasets": [{"path": "0"}],
+                        "axes": metadata.get("axes", [{"name": "t"}, {"name": "c"}, {"name": "z"}, {"name": "y"},
+                                                      {"name": "x"}])
                     }]
-                    z.attrs["multiscales"] = multiscales
-                except Exception:
+                except:
                     pass
 
         await main_loop.run_in_executor(None, run_dask)

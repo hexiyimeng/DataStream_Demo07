@@ -1,57 +1,92 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {useNodesState, useEdgesState, addEdge, type Connection, type Node, type Edge} from '@xyflow/react';
-import type { NodeSpec, WSMessage, Workflow, LogEntry, BrainFlowNodeData } from '../types';
+import { useNodesState, useEdgesState, addEdge, type Connection, type Node, type Edge } from '@xyflow/react';
+import type { NodeSpec, WSMessage, Workflow, LogEntry, NodeData } from '../types';
 import { FlowContext } from './FlowContextDef';
+import { useUndoRedo } from '../hooks/useUndoRedo'; // ⚠️ 确保已创建此 Hook
 
 export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [nodes, setNodes, onNodesChange] = useNodesState<Node<BrainFlowNodeData>>([]);
+  // === 1. 核心状态管理 ===
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node<NodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [isConsoleOpen, setIsConsoleOpen] = useState(true);
-  const toggleConsole = () => setIsConsoleOpen(prev => !prev);
-  const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
 
-  const [workflows, setWorkflows] = useState<Workflow[]>(() => [{ id: '1', name: 'Workflow 1', nodes: [], edges: [], timestamp: Date.now() }]);
+  // 工作流状态
+  const [workflows, setWorkflows] = useState<Workflow[]>(() => [
+    { id: '1', name: 'Workflow 1', nodes: [], edges: [], timestamp: Date.now() }
+  ]);
   const [activeWorkflowId, setActiveWorkflowId] = useState<string>('1');
   const [nodeDefs, setNodeDefs] = useState<Record<string, NodeSpec>>({});
   const [isConnected, setIsConnected] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  // === 2. 引用与缓冲池 (性能优化核心) ===
   const wsRef = useRef<WebSocket | null>(null);
 
-  const addLog = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
-    setLogs(prev => {
-        // 简单防抖：如果最后一条日志跟这一条一样，就不重复添加（针对进度刷屏）
-        if (prev.length > 0 && prev[prev.length - 1].message === message) return prev;
-        return [...prev, { id: Date.now().toString() + Math.random(), timestamp: new Date().toLocaleTimeString(), type, message }].slice(-100);
-    });
-  };
+  // 🔥 [优化] 缓冲池：避免 WebSocket 高频消息导致 React 频繁重绘
+  // key: nodeId, value: { progress, message }
+  const progressBufferRef = useRef<Map<string, { progress: number; message?: string }>>(new Map());
+  const logBufferRef = useRef<LogEntry[]>([]);
 
+  // === 3. Undo/Redo 系统初始化 ===
+  // 这里传入 setNodes/setEdges 的包装器，确保类型安全
+  const { undo, redo, takeSnapshot, syncCurrentState } = useUndoRedo<BrainFlowNodeData>(
+    [], [],
+    (nds: Node<BrainFlowNodeData>[]) => setNodes(nds),
+    (eds: Edge[]) => setEdges(eds)
+  );
+
+  // === 4. 辅助功能 ===
+  const toggleConsole = () => setIsConsoleOpen(prev => !prev);
+  const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
+
+  // 日志添加 (带缓冲)
+  const addLog = useCallback((message: string, type: 'info' | 'success' | 'error' = 'info') => {
+    logBufferRef.current.push({
+      id: Date.now().toString() + Math.random(),
+      timestamp: new Date().toLocaleTimeString(),
+      type,
+      message
+    });
+  }, []);
+
+  // === 5. WebSocket 连接与心跳循环 ===
   useEffect(() => {
-    fetch('http://localhost:8000/object_info').then(res => res.json()).then(setNodeDefs).catch(err => addLog(`API Error: ${err}`, 'error'));
+    // 获取节点定义
+    fetch('http://localhost:8000/object_info')
+      .then(res => res.json())
+      .then(setNodeDefs)
+      .catch(err => addLog(`API Error: ${err}`, 'error'));
+
     const connectWs = () => {
         const ws = new WebSocket('ws://localhost:8000/ws/run');
-        ws.onopen = () => { setIsConnected(true); addLog("Server Connected", 'success'); };
-        ws.onclose = () => { setIsConnected(false); setTimeout(connectWs, 3000); };
+
+        ws.onopen = () => {
+          setIsConnected(true);
+          addLog("Server Connected", 'success');
+        };
+
+        ws.onclose = () => {
+          setIsConnected(false);
+          setTimeout(connectWs, 3000);
+        };
 
         ws.onmessage = (e) => {
           try {
             const msg: WSMessage = JSON.parse(e.data);
 
-            // 1. 普通日志
-            if (msg.type === 'log') addLog(msg.message || '', 'info');
+            if (msg.type === 'log') {
+              addLog(msg.message || '', 'info');
+            }
 
-            // 2. 进度更新
             if (msg.type === 'progress' && msg.taskId) {
-               setNodes(nds => nds.map(n => n.id === msg.taskId ? {
-                 ...n,
-                 data: {
-                    ...n.data,
-                    progress: msg.progress ?? 0,
-                    message: msg.message // 【关键】把消息存进去，DynamicNode 才能显示
-                 }
-               } : n));
+               // 仅更新缓冲区，不触发重绘
+               progressBufferRef.current.set(msg.taskId, {
+                 progress: msg.progress ?? 0,
+                 message: msg.message
+               });
 
-               // 【关键】如果后端发来了描述性文字 (例如 "Writing... 10%")，也打印到控制台
+               // 关键状态日志直接输出
                if (msg.message && msg.message !== "Done" && !msg.message.startsWith("Start")) {
                    addLog(`[${msg.taskId.split('_')[0]}] ${msg.message}`, 'info');
                }
@@ -65,63 +100,120 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
         wsRef.current = ws;
     };
-    connectWs();
-    return () => wsRef.current?.close();
-  }, [setNodes]);
 
+    connectWs();
+
+    // 🔥 [性能核心] 统一刷新循环 (Game Loop 模式)
+    // 每 100ms 检查一次缓冲区，如果有数据变化才 setNodes
+    const tick = setInterval(() => {
+      // 1. 处理进度更新
+      if (progressBufferRef.current.size > 0) {
+        const updates = new Map(progressBufferRef.current);
+        progressBufferRef.current.clear();
+
+        setNodes((nds) => nds.map((n) => {
+          if (updates.has(n.id)) {
+            const updateData = updates.get(n.id);
+            // 浅比较，如果没变化就不返回新对象 (React 优化)
+            if (n.data.progress === updateData?.progress && n.data.message === updateData?.message) {
+              return n;
+            }
+            return { ...n, data: { ...n.data, ...updateData } };
+          }
+          return n;
+        }));
+      }
+
+      // 2. 处理日志更新
+      if (logBufferRef.current.length > 0) {
+        const newLogs = [...logBufferRef.current];
+        logBufferRef.current = [];
+
+        setLogs(prev => {
+          const lastMsg = prev.length > 0 ? prev[prev.length - 1].message : '';
+          // 简单去重：如果连续两条日志完全一样，丢弃
+          const filtered = newLogs.filter((l, i) =>
+             i === 0 ? l.message !== lastMsg : l.message !== newLogs[i-1].message
+          );
+          if (filtered.length === 0) return prev;
+          return [...prev, ...filtered].slice(-100);
+        });
+      }
+    }, 100);
+
+    return () => {
+      wsRef.current?.close();
+      clearInterval(tick);
+    };
+  }, [setNodes, addLog]);
+
+  // === 6. 历史记录快照逻辑 (Snapshot) ===
+  useEffect(() => {
+      // 1. 总是保持当前状态同步给 Hook 内部的 Ref
+      syncCurrentState(nodes, edges);
+
+      // 2. 智能快照：过滤掉系统自动产生的更新 (如进度条)
+      // 逻辑：如果当前有任何节点处于 "运行中" (0 < progress < 100)，即使 nodes 变了也不记入历史
+      const isSystemUpdate = nodes.some(n => n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100);
+
+      if (!isSystemUpdate) {
+         takeSnapshot();
+      }
+
+  }, [nodes, edges, syncCurrentState, takeSnapshot]);
+
+  // === 7. 快捷键监听 (Ctrl+Z / Ctrl+Y) ===
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 如果焦点在输入框，不触发撤销
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [undo, redo]);
+
+  // === 8. 主题同步 ===
   useEffect(() => {
     if (theme === 'dark') document.documentElement.classList.add('dark');
     else document.documentElement.classList.remove('dark');
   }, [theme]);
 
-  // 【新增】核心类型校验逻辑
-  // =========================================================
+  // === 9. 核心类型校验逻辑 ===
   const isValidConnection = useCallback((connection: Connection | Edge) => {
-    // 1. 查找源节点和目标节点
     const sourceNode = nodes.find(n => n.id === connection.source);
     const targetNode = nodes.find(n => n.id === connection.target);
 
     if (!sourceNode || !targetNode) return false;
 
-    // 2. 获取源节点的输出类型
-    // DynamicNode 中输出 Handle 的 ID 是数字索引 ("0", "1"...)
     const sourceSpec = sourceNode.data.nodeSpec;
     const sourceHandleIndex = parseInt(connection.sourceHandle || "0");
-
-    // 安全检查：防止索引越界
     if (!sourceSpec?.output || !sourceSpec.output[sourceHandleIndex]) return false;
     const outputType = sourceSpec.output[sourceHandleIndex];
 
-    // 3. 获取目标节点的输入类型
-    // DynamicNode 中输入 Handle 的 ID 是参数名 (例如 "stream", "model")
     const targetSpec = targetNode.data.nodeSpec;
     const targetHandleName = connection.targetHandle;
-
     if (!targetSpec || !targetHandleName) return false;
 
-    // 在 required 中查找该输入的定义
-    // ComfyUI 协议: required 的值是 ["TYPE", {config}] 或 ["TYPE"]
-    const inputConfig = targetSpec.input?.required?.[targetHandleName];
-
-    // 如果没找到配置，说明这个 Handle 不应该存在，禁止连接
+    const inputConfig = targetSpec.input?.required?.[targetHandleName] || targetSpec.input?.optional?.[targetHandleName];
     if (!inputConfig) return false;
 
-    // 提取类型字符串 (数组的第一个元素)
     const inputType = Array.isArray(inputConfig) ? inputConfig[0] : inputConfig;
 
-    // 4. 类型比对
-    // 支持通配符 "*" (ComfyUI 习惯)
     if (inputType === "*" || outputType === "*") return true;
+    return outputType === inputType;
+  }, [nodes]);
 
-    // 严格相等校验
-    const isValid = outputType === inputType;
-
-    // (可选) 调试日志
-    // if (!isValid) console.warn(`[TypeCheck] Blocked: ${outputType} -> ${inputType}`);
-
-    return isValid;
-  }, [nodes]); // 依赖 nodes 数据
-
+  // === 10. 工作流管理 ===
   const saveCurrentWorkflow = useCallback(() => {
     setWorkflows(prev => prev.map(w => w.id === activeWorkflowId ? { ...w, nodes, edges } : w));
   }, [nodes, edges, activeWorkflowId]);
@@ -136,44 +228,56 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const target = workflows.find(w => w.id === id);
     if (target) { setActiveWorkflowId(id); setNodes(target.nodes || []); setEdges(target.edges || []); }
   };
+
   const createWorkflow = () => {
     saveCurrentWorkflow();
     const newId = Date.now().toString();
     setWorkflows(prev => [...prev, { id: newId, name: `Workflow ${workflows.length + 1}`, nodes: [], edges: [], timestamp: Date.now() }]);
     setActiveWorkflowId(newId); setNodes([]); setEdges([]);
   };
+
   const deleteWorkflow = (id: string) => {
     if (workflows.length <= 1) return;
     const newWfs = workflows.filter(w => w.id !== id);
     setWorkflows(newWfs);
     if (activeWorkflowId === id) switchWorkflow(newWfs[0].id);
   };
+
   const renameWorkflow = (id: string, name: string) => setWorkflows(prev => prev.map(w => w.id === id ? { ...w, name } : w));
 
+  // === 11. 节点操作 ===
   const addNode = useCallback((type: string) => {
     const spec = nodeDefs[type]; if (!spec) return;
     setNodes((nds) => nds.concat({
-      id: `${type}_${Date.now()}`, type: 'dynamic', position: { x: Math.random() * 400 + 200, y: Math.random() * 300 + 100 },
+      id: `${type}_${Date.now()}`,
+      type: 'dynamic',
+      position: { x: Math.random() * 400 + 200, y: Math.random() * 300 + 100 },
       data: { opType: type, nodeSpec: spec, values: {}, progress: 0, message: "" },
     }));
   }, [nodeDefs, setNodes]);
-
 
   const addNodeAt = useCallback((type: string, position: {x: number, y: number}) => {
     const spec = nodeDefs[type]; if (!spec) return;
     setNodes((nds) => nds.concat({
       id: `${type}_${Date.now()}`,
       type: 'dynamic',
-      position: position, // 使用传入的坐标
+      position: position,
       data: { opType: type, nodeSpec: spec, values: {}, progress: 0, message: "" },
     }));
   }, [nodeDefs, setNodes]);
 
-  const updateNodeData = useCallback((id: string, newData: Partial<BrainFlowNodeData>) => {
+  const updateNodeData = useCallback((id: string, newData: Partial<NodeData>) => {
     setNodes((nds) => nds.map((n) => n.id === id ? { ...n, data: { ...n.data, ...newData } } : n));
   }, [setNodes]);
 
-  const onConnect = useCallback((params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds)), [setEdges]);
+  const onConnect = useCallback((params: Connection) => {
+      // 增强: 连接时校验 + 自动添加
+      if (isValidConnection(params)) {
+          setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds));
+      } else {
+          addLog("Invalid Connection: Type Mismatch", "error");
+      }
+  }, [setEdges, isValidConnection, addLog]);
 
   const runFlow = useCallback(() => {
     if (!wsRef.current) return;
@@ -181,13 +285,16 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     nodes.forEach((node) => {
       const inputs = { ...node.data.values };
       edges.forEach((edge) => {
-        if (edge.target === node.id && edge.targetHandle) inputs[edge.targetHandle] = [edge.source, parseInt(edge.sourceHandle || "0")];
+        if (edge.target === node.id && edge.targetHandle) {
+             inputs[edge.targetHandle] = [edge.source, parseInt(edge.sourceHandle || "0")];
+        }
       });
       graph[node.id] = { type: node.data.opType, inputs };
     });
+
     wsRef.current.send(JSON.stringify({ command: 'execute_graph', graph }));
-    addLog(" Request Sent", 'info');
-  }, [nodes, edges]);
+    addLog("Executing Workflow...", 'info');
+  }, [nodes, edges, addLog]);
 
   const clearLogs = () => setLogs([]);
 
@@ -197,7 +304,8 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
       addNode, addNodeAt, updateNodeData, runFlow, clearLogs,
       createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,
-      theme, toggleTheme, isConsoleOpen, toggleConsole, isValidConnection
+      theme, toggleTheme, isConsoleOpen, toggleConsole, isValidConnection,
+      undo, redo // 🔥 暴露撤销重做方法
     }}>
       {children}
     </FlowContext.Provider>

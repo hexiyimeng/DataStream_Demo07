@@ -71,7 +71,7 @@ export default function Sidebar() {
       {activeTab === 'nodes' && (
         <div
             className="h-full bg-[var(--node-body)] border-r border-[var(--node-border)] flex flex-col shadow-2xl pointer-events-auto relative"
-            style={{ width: width }} // 🔥 动态宽度
+            style={{ width: width }} //  动态宽度
         >
           <div className="p-3 border-b border-[var(--node-border)]">
              <input
@@ -94,7 +94,7 @@ export default function Sidebar() {
             </div>
           </div>
 
-          {/* 🔥 拖拽手柄 */}
+          {/*  拖拽手柄 */}
           <div
             onMouseDown={startResizing}
             className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize hover:bg-blue-500/50 transition-colors z-50"

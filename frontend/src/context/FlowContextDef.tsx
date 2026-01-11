@@ -1,13 +1,13 @@
 import React from 'react';
 import { type Node, type Edge, type OnNodesChange, type OnEdgesChange, type Connection } from '@xyflow/react';
-import type { NodeSpec, Workflow, LogEntry, BrainFlowNodeData } from '../types';
+import type { NodeSpec, Workflow, LogEntry, NodeData } from '../types';
 
 export interface FlowContextType {
-  nodes: Node<BrainFlowNodeData>[];
+  nodes: Node<NodeData>[];
   edges: Edge[];
-  onNodesChange: OnNodesChange<Node<BrainFlowNodeData>>;
+  onNodesChange: OnNodesChange<Node<NodeData>>;
   onEdgesChange: OnEdgesChange<Edge>;
-  setNodes: React.Dispatch<React.SetStateAction<Node<BrainFlowNodeData>[]>>;
+  setNodes: React.Dispatch<React.SetStateAction<Node<NodeData>[]>>;
   setEdges: React.Dispatch<React.SetStateAction<Edge[]>>;
   theme: 'light' | 'dark';
   toggleTheme: () => void;
@@ -27,9 +27,11 @@ export interface FlowContextType {
   addNode: (type: string) => void;
   addNodeAt: (type: string, position: {x: number, y: number}) => void;
   isValidConnection: (connection: Connection | Edge) => boolean;
-  updateNodeData: (id: string, data: Partial<BrainFlowNodeData>) => void;
+  updateNodeData: (id: string, data: Partial<NodeData>) => void;
   runFlow: () => void;
   clearLogs: () => void;
+  undo: () => void;
+  redo: () => void;
 }
 
 export const FlowContext = React.createContext<FlowContextType | null>(null);

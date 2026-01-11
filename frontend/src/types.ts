@@ -1,46 +1,48 @@
 import type { Node, Edge } from '@xyflow/react';
 
-// 1. 基础配置
+// === 基础配置 ===
 export interface NodeInputConfig {
   [key: string]: [string, Record<string, unknown>?];
 }
 
+// === 节点的规格 (Node Specification) ===
 export interface NodeSpec {
-  type: string;
-  display_name: string;
-  category: string;
-  input: { required: NodeInputConfig; optional?: NodeInputConfig };
-  output: string[];
+  type: string;  // 节点类型标识 (如 "LoadImage")
+  display_name: string; // 显示名称 (如 "Load Image")
+  category: string; // 分类目录 (如 "image/loaders")
+  input: { required: NodeInputConfig; optional?: NodeInputConfig }; // 输入定义
+  output: string[]; // 输出类型列表 (如 ["IMAGE", "MASK"])
 }
 
-// 2. 节点数据
-export interface BrainFlowNodeData extends Record<string, unknown> {
-  opType: string;
-  nodeSpec: NodeSpec;
-  values: Record<string, unknown>;
-  progress: number;
-  message?: string;
+// === 节点数据 (Node Data) ===
+export interface NodeData extends Record<string, unknown> {
+  opType: string;    // 操作类型 (对应 NodeSpec.type)
+  nodeSpec: NodeSpec; // 完整的规格定义
+  values: Record<string, unknown>; // 用户填写的参数值
+  progress: number;  // 运行进度 (0-100)
+  message?: string;  // 运行状态消息 (如 "Loading...")
+  // 可选：用于直接更新值的辅助函数
   updateValue?: (id: string, key: string, val: unknown) => void;
 }
 
-// 3. WebSocket 消息
+// === WebSocket 消息结构 ===
 export interface WSMessage {
-  type: 'log' | 'progress' | 'error' | 'done';
+  type: 'log' | 'progress' | 'error' | 'done' | 'executed';
   message?: string;
-  taskId?: string;
+  taskId?: string; // 对应节点的 ID
   progress?: number;
 }
 
-// 4. 新增：工作流（用于多标签页）
+// === 工作流 (Workflow) ===
 export interface Workflow {
   id: string;
   name: string;
-  nodes: Node<BrainFlowNodeData>[];
+  nodes: Node<NodeData>[];
   edges: Edge[];
   timestamp: number;
 }
 
-// 5. 新增：日志条目
+// === 日志条目 ===
 export interface LogEntry {
   id: string;
   timestamp: string;

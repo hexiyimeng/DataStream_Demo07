@@ -1,7 +1,7 @@
 // src/components/DynamicNode.tsx
 import { memo, useCallback, useMemo, useState, useRef, useEffect } from 'react';
 import { Handle, Position, NodeResizer, type NodeProps } from '@xyflow/react';
-import type { BrainFlowNodeData } from '../types';
+import type { NodeData } from '../types';
 import { useFlow } from '../hooks/useFlowContext';
 import { createPortal } from 'react-dom';
 
@@ -12,8 +12,14 @@ const TYPE_COLORS: Record<string, string> = {
   "DASK_ARRAY": "#06b6d4",
 };
 
-// ... (ValuePopup 保持不变) ...
-const ValuePopup = ({ initialValue, onSave, onClose, anchorRect }: any) => {
+interface ValuePopupProps {
+  initialValue: string;
+  onSave: (value: string) => void;
+  onClose: () => void;
+  anchorRect: DOMRect | null;
+}
+
+const ValuePopup = ({ initialValue, onSave, onClose, anchorRect }: ValuePopupProps) => {
   const [val, setVal] = useState(initialValue);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); inputRef.current?.select(); }, []);
@@ -38,8 +44,14 @@ const ValuePopup = ({ initialValue, onSave, onClose, anchorRect }: any) => {
   );
 };
 
-// ... (ControlWidget 保持不变) ...
-const ControlWidget = ({ name, config, value, onChange }: any) => {
+interface ControlWidgetProps {
+  name: string;
+  config: [string, Record<string, unknown>?];
+  value: unknown;
+  onChange: (name: string, value: unknown) => void;
+}
+
+const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) => {
   const [type, options] = config;
   const [showPopup, setShowPopup] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -57,24 +69,53 @@ const ControlWidget = ({ name, config, value, onChange }: any) => {
           <div ref={containerRef} className={containerClass} onClick={handlePopupOpen}>
              <span className={labelClass} title={name}>{displayLabel}</span>
              <div className={`${inputBgClass} flex-1 justify-end border border-[var(--node-border)] hover:border-[#888] transition-colors`}>
-                <span className={`${inputClass} hover:text-blue-500`} title={value}>{value || <span className="opacity-30 italic">Empty</span>}</span>
+                <span className={`${inputClass} hover:text-blue-500`} title={value != null ? String(value) : ''}>{value != null ? String(value) : <span className="opacity-30 italic">Empty</span>}</span>
              </div>
           </div>
-          {showPopup && <ValuePopup initialValue={value} anchorRect={anchorRect} onSave={(v: any) => { onChange(name, v); setShowPopup(false); }} onClose={() => setShowPopup(false)} />}
+          {showPopup && <ValuePopup initialValue={String(value) || ''} anchorRect={anchorRect} onSave={(v) => { onChange(name, v); setShowPopup(false); }} onClose={() => setShowPopup(false)} />}
         </>
      )
   }
   if (type === 'INT' || type === 'FLOAT') {
       const step = options?.step || (type === 'FLOAT' ? 0.01 : 1);
       const val = Number(value ?? options?.default ?? 0);
-      const handleStep = (direction: 1 | -1, shiftKey: boolean) => { const multiplier = shiftKey ? 10 : 1; onChange(name, type === 'FLOAT' ? parseFloat((val + (step * direction * multiplier)).toFixed(5)) : val + (step * direction * multiplier)); };
+
+      const handleStep = (direction: 1 | -1, shiftKey: boolean) => {
+          const multiplier = shiftKey ? 10 : 1;
+          onChange(name, type === 'FLOAT' ? parseFloat((val + (step * direction * multiplier)).toFixed(5)) : val + (step * direction * multiplier));
+      };
+
       return (
         <div className={containerClass}>
            <span className={labelClass} title={name}>{name}</span>
            <div className="flex items-center gap-0.5 shrink-0 ml-auto">
-              <button className="text-[var(--text-label)] hover:text-[var(--text-head)] cursor-pointer select-none px-0.5 transition-colors" onClick={(e) => handleStep(-1, e.shiftKey)}>◀</button>
-              <div className={`${inputBgClass} w-16 border border-[var(--node-border)]`}><input type="number" className={`${inputClass} text-center no-spinners selection:bg-blue-500/30`} value={val} onChange={e => onChange(name, Number(e.target.value))} step={step} /></div>
-              <button className="text-[var(--text-label)] hover:text-[var(--text-head)] cursor-pointer select-none px-0.5 transition-colors" onClick={(e) => handleStep(1, e.shiftKey)}>▶</button>
+              {/* 🔥🔥🔥 【修复】同时拦截 onClick 和 onDoubleClick */}
+              <button
+                className="text-[var(--text-label)] hover:text-[var(--text-head)] cursor-pointer select-none px-0.5 transition-colors active:scale-90"
+                onClick={(e) => { e.stopPropagation(); handleStep(-1, e.shiftKey); }}
+                onDoubleClick={(e) => e.stopPropagation()}
+                aria-label="Decrease value"
+              >◀</button>
+
+              <div className={`${inputBgClass} w-16 border border-[var(--node-border)]`}>
+                  <input
+                    type="number"
+                    className={`${inputClass} text-center no-spinners selection:bg-blue-500/30`}
+                    value={val}
+                    onChange={e => onChange(name, Number(e.target.value))}
+                    step={step}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  />
+              </div>
+
+              {/* 🔥🔥🔥 【修复】同时拦截 onClick 和 onDoubleClick */}
+              <button
+                className="text-[var(--text-label)] hover:text-[var(--text-head)] cursor-pointer select-none px-0.5 transition-colors active:scale-90"
+                onClick={(e) => { e.stopPropagation(); handleStep(1, e.shiftKey); }}
+                onDoubleClick={(e) => e.stopPropagation()}
+                aria-label="Increase value"
+              >▶</button>
            </div>
         </div>
       );
@@ -83,39 +124,41 @@ const ControlWidget = ({ name, config, value, onChange }: any) => {
     return (
       <div className={containerClass}>
         <span className={labelClass} title={name}>{name}</span>
-        <div className={`${inputBgClass} flex-1 justify-end border border-[var(--node-border)]`}><select className={`${inputClass} cursor-pointer appearance-none bg-transparent nodrag text-right`} value={value ?? type[0]} onChange={e => onChange(name, e.target.value)}>{type.map((o: string) => <option key={o} value={o} className="bg-[var(--node-body)] text-[var(--text-val)]">{o}</option>)}</select></div>
+        <div className={`${inputBgClass} flex-1 justify-end border border-[var(--node-border)]`}>
+          <select 
+            className={`${inputClass} cursor-pointer appearance-none bg-transparent nodrag text-right`} 
+            value={String(value ?? type[0])} 
+            onChange={e => onChange(name, e.target.value)}
+          >
+            {type.map((o: string) => <option key={o} value={o} className="bg-[var(--node-body)] text-[var(--text-val)]">{o}</option>)}
+          </select>
+        </div>
       </div>
     );
   }
   return null;
 };
 
-// === 主节点组件 ===
-const DynamicNode = ({ id, data, selected }: NodeProps<BrainFlowNodeData>) => {
-  const { nodeSpec, values = {}, progress, message } = data;
+const DynamicNode = ({ id, data, selected }: NodeProps<{ data: NodeData }>) => {
+  const { nodeSpec, values = {}, progress, message } = data.data as NodeData;
   const { updateNodeData } = useFlow();
   const [collapsed, setCollapsed] = useState(false);
 
-  const handleUpdate = useCallback((key: string, v: any) => updateNodeData(id, { values: { ...values, [key]: v } }), [id, values, updateNodeData]);
+  const handleUpdate = useCallback((key: string, v: unknown) => updateNodeData(id, { values: { ...values, [key]: v } }), [id, values, updateNodeData]);
 
   const { linkInputs, widgets } = useMemo(() => {
-    const links: any[] = [], wids: any[] = [];
-
-    // 🔥🔥🔥 【核心修复】同时合并 required 和 optional 🔥🔥🔥
-    const allInputs = {
-        ...(nodeSpec?.input?.required || {}),
-        ...(nodeSpec?.input?.optional || {})
-    };
+    const links: { name: string; type: string; color: string }[] = [];
+    const wids: { name: string; config: [string, Record<string, unknown>?] }[] = [];
+    
+    const allInputs = { ...(nodeSpec?.input?.required || {}), ...(nodeSpec?.input?.optional || {}) };
 
     if (allInputs) {
       Object.entries(allInputs).forEach(([name, config]) => {
-        // 安全检查：防止 config 不存在
         if (!config) return;
-
-        const [type] = config as [string, any];
+        const [type] = config as [string, Record<string, unknown>?];
         const isLink = !["INT", "FLOAT", "STRING", "BOOLEAN"].includes(type as string) && !Array.isArray(type);
         if (isLink) links.push({ name, type, color: TYPE_COLORS[type as string] || TYPE_COLORS.default });
-        else wids.push({ name, config });
+        else wids.push({ name, config: config as [string, Record<string, unknown>?] });
       });
     }
     return { linkInputs: links, widgets: wids };
@@ -128,41 +171,23 @@ const DynamicNode = ({ id, data, selected }: NodeProps<BrainFlowNodeData>) => {
 
   return (
     <>
-      <NodeResizer
-        color="#3b82f6"
-        isVisible={selected}
-        minWidth={220}
-        minHeight={60}
-        handleStyle={{ width: 6, height: 6, borderRadius: 2 }}
-        lineStyle={{ border: 'none' }}
-      />
-
+      <NodeResizer color="#3b82f6" isVisible={selected} minWidth={220} minHeight={60} handleStyle={{ width: 6, height: 6, borderRadius: 2 }} lineStyle={{ border: 'none' }} />
       <div
-        className={`
-          node-wrapper relative rounded-[4px] shadow-[var(--node-shadow)] bg-[var(--node-body)] transition-all group h-full flex flex-col
-          ${selected ? 'border-[#eee] ring-1 ring-[#eee]/30' : 'border-[var(--node-border)]'}
-          ${isError ? 'border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]' : 'border'}
-        `}
+        className={`node-wrapper relative rounded-[4px] shadow-[var(--node-shadow)] bg-[var(--node-body)] transition-all group h-full flex flex-col ${selected ? 'border-[#eee] ring-1 ring-[#eee]/30' : 'border-[var(--node-border)]'} ${isError ? 'border-red-500 shadow-[0_0_10px_rgba(239,68,68,0.3)]' : 'border'}`}
         onDoubleClick={() => setCollapsed(!collapsed)}
       >
-        {/* 进度条 */}
         {isRunning && <div className="absolute top-0 left-0 h-full bg-green-500/5 pointer-events-none z-0 rounded-[4px]" style={{ width: `${progress}%` }} />}
         {isRunning && <div className="absolute top-0 left-0 h-0.5 bg-green-500 z-50 rounded-t-[4px] shadow-[0_0_8px_#22c55e]" style={{ width: `${progress}%` }} />}
 
-        {/* Header */}
         <div className="relative h-6 px-2 flex items-center justify-between bg-[var(--node-header)] border-b border-[var(--node-border)] z-10 rounded-t-[4px] shrink-0 cursor-pointer" title="Double click to collapse">
            <span className="text-[11px] font-bold text-[var(--text-head)] truncate tracking-wide mr-2">{nodeSpec.display_name}</span>
            <div className="flex items-center gap-1.5">
-             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors duration-500 
-                ${isError ? 'bg-red-500 animate-pulse' : isComplete ? 'bg-green-500' : isRunning ? 'bg-yellow-400' : 'bg-[#444]'}`}
-             />
+             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors duration-500 ${isError ? 'bg-red-500 animate-pulse' : isComplete ? 'bg-green-500' : isRunning ? 'bg-yellow-400' : 'bg-[#444]'}`} />
              <span className="text-[9px] text-[var(--text-sub)]">{collapsed ? '▼' : '▲'}</span>
            </div>
         </div>
 
-        {/* Body */}
         <div className="relative p-1.5 space-y-1.5 z-10 flex-1 flex flex-col">
-          {/* Inputs / Outputs */}
           <div className="flex justify-between gap-4">
             <div className="flex flex-col gap-1.5 flex-1 min-w-0">
               {linkInputs.map((input) => (
@@ -172,7 +197,6 @@ const DynamicNode = ({ id, data, selected }: NodeProps<BrainFlowNodeData>) => {
                 </div>
               ))}
             </div>
-
             <div className="flex flex-col gap-1.5 items-end flex-1 min-w-0">
               {nodeSpec.output && nodeSpec.output.map((outType: string, i: number) => (
                 <div key={i} className="relative h-3.5 flex items-center justify-end pr-2">
@@ -182,16 +206,12 @@ const DynamicNode = ({ id, data, selected }: NodeProps<BrainFlowNodeData>) => {
               ))}
             </div>
           </div>
-
-          {/* Widgets */}
           {!collapsed && widgets.length > 0 && (
             <div className="pt-1.5 border-t border-[var(--node-border)] space-y-[2px] mt-1 flex-1 overflow-y-auto custom-scrollbar max-h-[300px]">
               {widgets.map((w) => <ControlWidget key={w.name} {...w} value={values[w.name]} onChange={handleUpdate} />)}
             </div>
           )}
         </div>
-
-        {/* Message Bar */}
         {(isRunning || isComplete || isError) && message && !collapsed && (
           <div className={`px-2 py-0.5 border-t border-[var(--node-border)] rounded-b-[4px] ${isError ? 'bg-red-500/10' : 'bg-[var(--widget-bg)]/90'}`}>
               <p className={`text-[9px] font-mono truncate text-center ${isError ? 'text-red-500' : 'text-green-500'}`}>{message}</p>
