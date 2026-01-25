@@ -1,5 +1,5 @@
 import React from 'react';
-import { type Node, type Edge, type OnNodesChange, type OnEdgesChange, type Connection } from '@xyflow/react';
+import { type Node, type Edge, type OnNodesChange, type OnEdgesChange, type Connection, type OnConnectStart, type OnConnectEnd } from '@xyflow/react';
 import type { NodeSpec, Workflow, LogEntry, NodeData } from '../types';
 
 export interface FlowContextType {
@@ -23,15 +23,25 @@ export interface FlowContextType {
   nodeDefs: Record<string, NodeSpec>;
   isConnected: boolean;
   logs: LogEntry[];
+
+  onConnectStart: OnConnectStart;
+  onConnectEnd: OnConnectEnd;
+  connectingType: string | null;
   onConnect: (connection: Connection) => void;
   addNode: (type: string) => void;
   addNodeAt: (type: string, position: {x: number, y: number}) => void;
   isValidConnection: (connection: Connection | Edge) => boolean;
   updateNodeData: (id: string, data: Partial<NodeData>) => void;
   runFlow: () => void;
+  stopFlow: () => void;
   clearLogs: () => void;
+
   undo: () => void;
   redo: () => void;
+
+  handleCopy: () => void;
+  handlePaste: () => void;
+  handleDelete: () => void;
 }
 
 export const FlowContext = React.createContext<FlowContextType | null>(null);

@@ -1,8 +1,17 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useNodesState, useEdgesState, addEdge, type Connection, type Node, type Edge } from '@xyflow/react';
+import {
+  useNodesState,
+  useEdgesState,
+  addEdge,
+  type Connection,
+  type Node,
+  type Edge,
+  type OnConnectStart,
+  type OnConnectEnd
+} from '@xyflow/react';
 import type { NodeSpec, WSMessage, Workflow, LogEntry, NodeData } from '../types';
 import { FlowContext } from './FlowContextDef';
-import { useUndoRedo } from '../hooks/useUndoRedo'; // ⚠️ 确保已创建此 Hook
+import { useUndoRedo } from '../hooks/useUndoRedo';
 
 export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // === 1. 核心状态管理 ===
@@ -10,6 +19,22 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
   const [isConsoleOpen, setIsConsoleOpen] = useState(true);
+
+  // 连线交互状态
+  const [connectingType, setConnectingType] = useState<string | null>(null);
+
+
+  useEffect(() => {
+    const root = document.documentElement; // 获取 <html> 标签
+    if (theme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+  }, [theme]);
+
+  // 剪贴板状态
+  const clipboardRef = useRef<{ nodes: Node<NodeData>[], edges: Edge[] } | null>(null);
 
   // 工作流状态
   const [workflows, setWorkflows] = useState<Workflow[]>(() => [
@@ -20,19 +45,15 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isConnected, setIsConnected] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
-  // === 2. 引用与缓冲池 (性能优化核心) ===
+  // === 2. 引用与缓冲池 ===
   const wsRef = useRef<WebSocket | null>(null);
-
-  // 🔥 [优化] 缓冲池：避免 WebSocket 高频消息导致 React 频繁重绘
-  // key: nodeId, value: { progress, message }
   const progressBufferRef = useRef<Map<string, { progress: number; message?: string }>>(new Map());
   const logBufferRef = useRef<LogEntry[]>([]);
 
-  // === 3. Undo/Redo 系统初始化 ===
-  // 这里传入 setNodes/setEdges 的包装器，确保类型安全
-  const { undo, redo, takeSnapshot, syncCurrentState } = useUndoRedo<BrainFlowNodeData>(
+  // === 3. Undo/Redo 系统 ===
+  const { undo, redo, takeSnapshot, syncCurrentState } = useUndoRedo<NodeData>(
     [], [],
-    (nds: Node<BrainFlowNodeData>[]) => setNodes(nds),
+    (nds: Node<NodeData>[]) => setNodes(nds),
     (eds: Edge[]) => setEdges(eds)
   );
 
@@ -40,7 +61,6 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const toggleConsole = () => setIsConsoleOpen(prev => !prev);
   const toggleTheme = () => setTheme(prev => prev === 'light' ? 'dark' : 'light');
 
-  // 日志添加 (带缓冲)
   const addLog = useCallback((message: string, type: 'info' | 'success' | 'error' = 'info') => {
     logBufferRef.current.push({
       id: Date.now().toString() + Math.random(),
@@ -52,7 +72,6 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // === 5. WebSocket 连接与心跳循环 ===
   useEffect(() => {
-    // 获取节点定义
     fetch('http://localhost:8000/object_info')
       .then(res => res.json())
       .then(setNodeDefs)
@@ -75,24 +94,54 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
           try {
             const msg: WSMessage = JSON.parse(e.data);
 
+            // 1. 处理系统级日志 (如 "Engine Started")
             if (msg.type === 'log') {
               addLog(msg.message || '', 'info');
             }
 
-            if (msg.type === 'progress' && msg.taskId) {
-               // 仅更新缓冲区，不触发重绘
+            // 2. 处理节点进度/状态 -> [关键：废话过滤]
+            if (msg.taskId) {
+               // A. 灵动岛状态 (始终更新，保证 UI 上的进度条和文字是活的)
                progressBufferRef.current.set(msg.taskId, {
                  progress: msg.progress ?? 0,
                  message: msg.message
                });
 
-               // 关键状态日志直接输出
-               if (msg.message && msg.message !== "Done" && !msg.message.startsWith("Start")) {
-                   addLog(`[${msg.taskId.split('_')[0]}] ${msg.message}`, 'info');
+               // B. 日志控制台 (严格过滤)
+               // 只有真正的报错、完成或者有意义的信息才进控制台
+               const text = msg.message || "";
+
+               // 定义“废话”关键词
+               const isSpam =
+                  text.includes("Running") ||     // 过滤 "Dask Running..."
+                  text.includes("Processing") ||  // 过滤 "Processing..."
+                  text.includes("Active") ||      // 过滤 "Active Tasks..."
+                  text.includes("[Sys]") ||       // 过滤系统监控
+                  text.includes("RAM:");          // 过滤内存信息
+
+               if (text.toLowerCase().includes("error")) {
+                   addLog(`[Node Error] ${text}`, 'error');
+               }
+               // 只有非废话才显示。这样你在 Python 里的 print("读取文件成功") 就能显示出来
+               else if (!isSpam && text !== "Done" && text !== "") {
+                   addLog(`[${msg.taskId.split('_')[0]}] ${text}`, 'info');
                }
             }
 
-            if (msg.type === 'done') addLog("Workflow Finished", 'success');
+            // 3. 处理全局错误
+            if (msg.type === 'error') {
+                progressBufferRef.current.clear(); // 🛑 出错时清空缓冲，停止所有节点动画
+                addLog(msg.message || "Unknown Error", 'error');
+                setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
+            }
+
+            // 4. 完成信号 -> [关键修复：解决线一直在转]
+            if (msg.type === 'done') {
+                progressBufferRef.current.clear(); // 🛑 核心操作：立即清空进度缓冲
+                addLog("Workflow Finished", 'success');
+                // 强制关闭所有连线动画
+                setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
+            }
 
           } catch (err) {
             console.error('WebSocket message parsing error:', err);
@@ -103,10 +152,9 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     connectWs();
 
-    // 🔥 [性能核心] 统一刷新循环 (Game Loop 模式)
-    // 每 100ms 检查一次缓冲区，如果有数据变化才 setNodes
+    // 定时更新器 (100ms)
+    // 这里的逻辑是从缓冲池里取数据更新 React 状态，避免高频渲染
     const tick = setInterval(() => {
-      // 1. 处理进度更新
       if (progressBufferRef.current.size > 0) {
         const updates = new Map(progressBufferRef.current);
         progressBufferRef.current.clear();
@@ -114,7 +162,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setNodes((nds) => nds.map((n) => {
           if (updates.has(n.id)) {
             const updateData = updates.get(n.id);
-            // 浅比较，如果没变化就不返回新对象 (React 优化)
+            // 性能优化：只有数据真的变了才触发 React 更新
             if (n.data.progress === updateData?.progress && n.data.message === updateData?.message) {
               return n;
             }
@@ -124,14 +172,13 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }));
       }
 
-      // 2. 处理日志更新
       if (logBufferRef.current.length > 0) {
         const newLogs = [...logBufferRef.current];
         logBufferRef.current = [];
 
         setLogs(prev => {
           const lastMsg = prev.length > 0 ? prev[prev.length - 1].message : '';
-          // 简单去重：如果连续两条日志完全一样，丢弃
+          // 简单的去重逻辑
           const filtered = newLogs.filter((l, i) =>
              i === 0 ? l.message !== lastMsg : l.message !== newLogs[i-1].message
           );
@@ -147,73 +194,115 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [setNodes, addLog]);
 
-  // === 6. 历史记录快照逻辑 (Snapshot) ===
+  // === 6. 历史记录快照逻辑 (保持不变) ===
   useEffect(() => {
-      // 1. 总是保持当前状态同步给 Hook 内部的 Ref
       syncCurrentState(nodes, edges);
-
-      // 2. 智能快照：过滤掉系统自动产生的更新 (如进度条)
-      // 逻辑：如果当前有任何节点处于 "运行中" (0 < progress < 100)，即使 nodes 变了也不记入历史
       const isSystemUpdate = nodes.some(n => n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100);
-
       if (!isSystemUpdate) {
          takeSnapshot();
       }
-
   }, [nodes, edges, syncCurrentState, takeSnapshot]);
 
-  // === 7. 快捷键监听 (Ctrl+Z / Ctrl+Y) ===
+  // === 7. 连线感知逻辑 (保持不变) ===
+  const onConnectStart: OnConnectStart = useCallback((_, { nodeId, handleId, handleType }) => {
+    if (!nodeId || !handleId || handleType !== 'source') return;
+    const sourceNode = nodes.find(n => n.id === nodeId);
+    if (!sourceNode || !sourceNode.data.nodeSpec) return;
+    const typeIndex = parseInt(handleId);
+    const outType = sourceNode.data.nodeSpec.output?.[typeIndex];
+    if (outType) setConnectingType(outType);
+  }, [nodes]);
+
+  const onConnectEnd: OnConnectEnd = useCallback(() => {
+    setConnectingType(null);
+  }, []);
+
+  // === 8. 剪贴板与删除逻辑 (保持不变) ===
+  const handleCopy = useCallback(() => {
+    const selectedNodes = nodes.filter(n => n.selected);
+    if (selectedNodes.length === 0) return;
+    const selectedIds = new Set(selectedNodes.map(n => n.id));
+    const selectedEdges = edges.filter(e => selectedIds.has(e.source) && selectedIds.has(e.target));
+    clipboardRef.current = { nodes: selectedNodes, edges: selectedEdges };
+    addLog(`Copied ${selectedNodes.length} nodes`, 'info');
+  }, [nodes, edges, addLog]);
+
+  const handlePaste = useCallback(() => {
+    if (!clipboardRef.current) return;
+    const { nodes: cpNodes, edges: cpEdges } = clipboardRef.current;
+    const idMap = new Map<string, string>();
+    const newNodes: Node<NodeData>[] = [];
+    const offset = 20 + Math.random() * 30;
+
+    cpNodes.forEach(n => {
+       const newId = `${n.data.opType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+       idMap.set(n.id, newId);
+       newNodes.push({
+         ...n,
+         id: newId,
+         position: { x: n.position.x + offset, y: n.position.y + offset },
+         selected: true,
+         data: { ...n.data, progress: 0, message: '' }
+       });
+    });
+
+    const newEdges = cpEdges.map(e => ({
+      ...e,
+      id: `e_${idMap.get(e.source)}-${idMap.get(e.target)}_${Math.random()}`,
+      source: idMap.get(e.source)!,
+      target: idMap.get(e.target)!,
+      selected: true
+    }));
+
+    setNodes(nds => nds.map(n => ({ ...n, selected: false } as Node<NodeData>)).concat(newNodes));
+    setEdges(eds => eds.map(e => ({ ...e, selected: false } as Edge)).concat(newEdges));
+    addLog(`Pasted ${newNodes.length} nodes`, 'info');
+  }, [setNodes, setEdges, addLog]);
+
+  const handleDelete = useCallback(() => {
+      const selectedNodes = nodes.filter(n => n.selected);
+      const selectedEdges = edges.filter(e => e.selected);
+      if (selectedNodes.length === 0 && selectedEdges.length === 0) return;
+      setNodes(nds => nds.filter(n => !n.selected));
+      setEdges(eds => eds.filter(e => !e.selected));
+  }, [nodes, edges, setNodes, setEdges]);
+
+  // === 9. 键盘事件监听 (保持不变) ===
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 如果焦点在输入框，不触发撤销
-      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return;
-
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) redo(); else undo();
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
-        e.preventDefault();
-        redo();
-      }
+      const target = e.target as HTMLElement;
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) return;
+      const isCtrl = e.metaKey || e.ctrlKey;
+      if (isCtrl && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+      else if (isCtrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+      else if (isCtrl && e.key.toLowerCase() === 'c') { e.preventDefault(); handleCopy(); }
+      else if (isCtrl && e.key.toLowerCase() === 'v') { e.preventDefault(); handlePaste(); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { handleDelete(); }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo]);
+  }, [undo, redo, handleCopy, handlePaste, handleDelete]);
 
-  // === 8. 主题同步 ===
-  useEffect(() => {
-    if (theme === 'dark') document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-  }, [theme]);
-
-  // === 9. 核心类型校验逻辑 ===
+  // === 10. 类型校验 (保持不变) ===
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceNode = nodes.find(n => n.id === connection.source);
     const targetNode = nodes.find(n => n.id === connection.target);
-
     if (!sourceNode || !targetNode) return false;
-
     const sourceSpec = sourceNode.data.nodeSpec;
     const sourceHandleIndex = parseInt(connection.sourceHandle || "0");
     if (!sourceSpec?.output || !sourceSpec.output[sourceHandleIndex]) return false;
     const outputType = sourceSpec.output[sourceHandleIndex];
-
     const targetSpec = targetNode.data.nodeSpec;
     const targetHandleName = connection.targetHandle;
     if (!targetSpec || !targetHandleName) return false;
-
     const inputConfig = targetSpec.input?.required?.[targetHandleName] || targetSpec.input?.optional?.[targetHandleName];
     if (!inputConfig) return false;
-
     const inputType = Array.isArray(inputConfig) ? inputConfig[0] : inputConfig;
-
     if (inputType === "*" || outputType === "*") return true;
     return outputType === inputType;
   }, [nodes]);
 
-  // === 10. 工作流管理 ===
+  // === 11. 工作流管理 (保持不变) ===
   const saveCurrentWorkflow = useCallback(() => {
     setWorkflows(prev => prev.map(w => w.id === activeWorkflowId ? { ...w, nodes, edges } : w));
   }, [nodes, edges, activeWorkflowId]);
@@ -245,7 +334,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const renameWorkflow = (id: string, name: string) => setWorkflows(prev => prev.map(w => w.id === id ? { ...w, name } : w));
 
-  // === 11. 节点操作 ===
+  // === 12. 节点操作 (保持不变) ===
   const addNode = useCallback((type: string) => {
     const spec = nodeDefs[type]; if (!spec) return;
     setNodes((nds) => nds.concat({
@@ -271,9 +360,8 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [setNodes]);
 
   const onConnect = useCallback((params: Connection) => {
-      // 增强: 连接时校验 + 自动添加
       if (isValidConnection(params)) {
-          setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds));
+          setEdges((eds) => addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds));
       } else {
           addLog("Invalid Connection: Type Mismatch", "error");
       }
@@ -291,10 +379,18 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       graph[node.id] = { type: node.data.opType, inputs };
     });
-
+    setEdges((eds) => eds.map(e => ({ ...e, animated: true })));
     wsRef.current.send(JSON.stringify({ command: 'execute_graph', graph }));
     addLog("Executing Workflow...", 'info');
-  }, [nodes, edges, addLog]);
+  }, [nodes, edges, addLog, setEdges]);
+
+  const stopFlow = useCallback(() => {
+    if (!wsRef.current) return;
+    wsRef.current.send(JSON.stringify({ command: 'stop_execution' }));
+    // 立即停止动画，不等后端回传，提升响应速度
+    setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
+    addLog("Requesting Stop...", 'info');
+  }, [addLog, setEdges]);
 
   const clearLogs = () => setLogs([]);
 
@@ -302,10 +398,12 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <FlowContext.Provider value={{
       nodes, edges, nodeDefs, isConnected, logs, workflows, activeWorkflowId,
       setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
-      addNode, addNodeAt, updateNodeData, runFlow, clearLogs,
+      addNode, addNodeAt, updateNodeData, runFlow, stopFlow ,clearLogs,
       createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,
       theme, toggleTheme, isConsoleOpen, toggleConsole, isValidConnection,
-      undo, redo // 🔥 暴露撤销重做方法
+      undo, redo,
+      onConnectStart, onConnectEnd, connectingType,
+      handleCopy, handlePaste, handleDelete
     }}>
       {children}
     </FlowContext.Provider>

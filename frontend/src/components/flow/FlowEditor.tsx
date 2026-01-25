@@ -1,4 +1,3 @@
-// React 基础 hooks 和类型定义
 import { useState, useCallback, type ComponentType } from 'react';
 import {
   ReactFlow,
@@ -14,23 +13,18 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useFlow } from '../../hooks/useFlowContext';
 import DynamicNode from '../DynamicNode';
-import ContextMenu from './ContextMenu'; // 【新增】
+import ContextMenu from './ContextMenu';
 
-
-
-
-// 注册动态节点组件到 React Flow
-// 将 DynamicNode 转换为 ComponentType<any> 类型以兼容 React Flow 的节点类型要求
+// 注册动态节点
 const nodeTypes: NodeTypes = { dynamic: DynamicNode as ComponentType<any> };
 
-// ... (FitIcon, MapIcon 等图标组件保持不变)
+// 图标组件
 const FitIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>;
 const MapIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" /></svg>;
 const ZoomInIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg>;
 const ZoomOutIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>;
 
 function BottomToolbar() {
-  // ... (保持不变)
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const { zoom } = useViewport();
   const [showMap, setShowMap] = useState(true);
@@ -52,32 +46,37 @@ function BottomToolbar() {
   );
 }
 
-
-// 主要的工作流编辑器组件，提供可视化节点编辑界面
 export default function FlowEditor() {
-  const { nodes, edges, onNodesChange, onEdgesChange, onConnect, theme, isConsoleOpen, addNodeAt ,isValidConnection} = useFlow();
+  const {
+      nodes, edges,
+      onNodesChange, onEdgesChange,
+      onConnect,
+      theme,
+      isConsoleOpen,
+      addNodeAt,
+      isValidConnection,
+      // 引入新增的事件回调
+      onConnectStart, onConnectEnd
+  } = useFlow();
 
-  // 获取 React Flow 实例用于坐标转换
   const { screenToFlowPosition } = useReactFlow();
 
-  // 定义连线时的样式
+  // 连线时的样式
   const connectionLineStyle = {
     stroke: '#fff',
     strokeWidth: 3,
   };
-  // 菜单状态
+
+  // 右键菜单位置状态
   const [menu, setMenu] = useState<{ x: number, y: number, flowPos: {x:number, y:number} } | null>(null);
 
   const onPaneContextMenu = useCallback(
-    (event: React.MouseEvent) => {
-      event.preventDefault(); // 阻止默认浏览器菜单
+    (event: React.MouseEvent<Element> | globalThis.MouseEvent) => {
+      event.preventDefault();
+      const nativeEvent = (event as React.MouseEvent).nativeEvent || event;
+      const screenX = nativeEvent.clientX;
+      const screenY = nativeEvent.clientY;
 
-      // 1. 获取点击时的屏幕坐标 (用于 ContextMenu CSS 定位)
-      const screenX = event.clientX;
-      const screenY = event.clientY;
-
-      // 2. 获取点击时对应的画布坐标 (用于 addNodeAt 放置节点)
-      // screenToFlowPosition 会自动计算 Zoom 和 Pan
       const flowPos = screenToFlowPosition({ x: screenX, y: screenY });
 
       setMenu({ x: screenX, y: screenY, flowPos });
@@ -91,17 +90,48 @@ export default function FlowEditor() {
     type: 'default',
     animated: true,
     style: { strokeWidth: 3, stroke: '#555' }
-};
+  };
 
+  // 处理拖拽放置
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }, []);
 
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
 
+      const type = event.dataTransfer.getData('application/reactflow');
+      if (typeof type === 'undefined' || !type) {
+        return;
+      }
+
+      const position = screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+
+      addNodeAt(type, position);
+    },
+    [screenToFlowPosition, addNodeAt],
+  );
 
   return (
-    <div className="flex-1 h-full w-full bg-[var(--bg-canvas)] relative transition-colors duration-300">
+    <div
+        className="flex-1 h-full w-full bg-[var(--bg-canvas)] relative transition-colors duration-300"
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+    >
       <ReactFlow
         nodes={nodes} edges={edges}
         onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+
+        // 绑定连线开始/结束事件
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
+
         nodeTypes={nodeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
         connectionMode={ConnectionMode.Loose}
@@ -112,8 +142,9 @@ export default function FlowEditor() {
         panOnScroll={true} zoomOnScroll={true} panOnDrag={[0, 1, 2]} selectionOnDrag={false}
         minZoom={0.1} maxZoom={3}
         colorMode={theme === 'dark' ? 'dark' : 'light'}
-        // 【关键】绑定右键和点击事件
+
         onNodeContextMenu={onPaneContextMenu}
+        onPaneContextMenu={onPaneContextMenu}
         onPaneClick={onPaneClick}
       >
         <Background id="grid-minor" className="pointer-events-none" color="var(--bg-grid-minor)" variant={BackgroundVariant.Lines} gap={10} size={1} lineWidth={1} style={{ backgroundColor: 'var(--bg-canvas)' }} />
@@ -134,7 +165,6 @@ export default function FlowEditor() {
           left={menu.x}
           onClose={() => setMenu(null)}
           onAddNode={(type) => {
-            // 使用之前计算好的画布坐标添加节点
             addNodeAt(type, menu.flowPos);
           }}
         />

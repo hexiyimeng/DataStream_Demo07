@@ -14,7 +14,7 @@ export default function Header() {
     theme, toggleTheme,
     workflows, activeWorkflowId,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow,
-    runFlow, setNodes, setEdges
+    runFlow, stopFlow, setNodes, setEdges
   } = useFlow();
 
   const reactFlowInstance = useReactFlow();
@@ -204,6 +204,12 @@ export default function Header() {
         >
           QUEUE
         </button>
+        <button
+        onClick={stopFlow}
+        className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-3 py-1.5 rounded shadow-sm transition-all active:scale-95"
+        >
+        STOP
+      </button>
       </div>
     </header>
   );
