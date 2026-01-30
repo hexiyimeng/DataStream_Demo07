@@ -32,7 +32,7 @@ class DaskCellpose:
             "required": {
                 "dask_arr": ("DASK_ARRAY",),
                 "diameter": ("FLOAT", {"default": 15.0, "min": 5.0, "max": 100.0}),
-                "model_type": (["cyto", "nuclei", "cyto2", "cyto3"],),  # 增加新模型支持
+                "model_type": (["cyto", "nuclei", "cyto2", "cyto3"],),
                 "flow_threshold": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0}),
                 "cellprob_threshold": ("FLOAT", {"default": 0.0, "min": -6.0, "max": 6.0}),
                 "gpu_batch_size": ("INT", {"default": 2, "min": 1, "max": 16}),

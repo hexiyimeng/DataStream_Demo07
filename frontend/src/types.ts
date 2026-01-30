@@ -27,7 +27,7 @@ export interface NodeData extends Record<string, unknown> {
 
 // === WebSocket 消息结构 ===
 export interface WSMessage {
-  type: 'log' | 'progress' | 'error' | 'done' | 'executed';
+  type: 'log' | 'success' | 'warning' | 'progress' | 'error' | 'done' | 'executed';
   message?: string;
   taskId?: string; // 对应节点的 ID
   progress?: number;

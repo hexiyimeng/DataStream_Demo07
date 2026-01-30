@@ -2,7 +2,6 @@ import Header from './components/layout/Header';
 import Sidebar from './components/layout/Sidebar';
 import BottomPanel from './components/layout/BottomPanel';
 import FlowEditor from './components/flow/FlowEditor';
-import GlobalProgress from "./components/layout/GlobalProgress.tsx";
 
 export default function App() {
   return (
@@ -13,7 +12,6 @@ export default function App() {
           <main className="flex-1 relative flex flex-col bg-[var(--bg-canvas)] overflow-hidden">
             <FlowEditor />
 
-              <GlobalProgress />
             <BottomPanel />
           </main>
         </div>

@@ -1,31 +1,40 @@
 # nodes/ome_zarr_flow.py
 import os
-import shutil
 import asyncio
+import numcodecs
 import numpy as np
-import warnings
+import zarr
+import dask.array as da
+import sys
 from registry import register_node
 
 # ==========================================
-#      Dask 依赖与显式集群启动
+# [修复] 稳健的导入逻辑
 # ==========================================
+# 1. 动态将父目录 (backend) 加入 Python 搜索路径
+#    这样无论在哪里启动，都能找到 dask_monitor.py
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.append(parent_dir)
+
+# 2. 尝试导入监控工具
 try:
-    import zarr
-    import dask.array as da
-    import scipy.ndimage
-    import numcodecs
-    from dask.distributed import Client, LocalCluster
+    from dask_monitor import monitor_dask_progress
+except ImportError:
+    monitor_dask_progress = None
+    print("Warning: 'dask_monitor.py' not found. Progress bars disabled.")
+
+try:
+    import dask.distributed
 
     HAS_LIBS = True
-
-    # 这里不需要再启动集群，全部交给 main.py 和 dask_manager 统一管理
-
 except ImportError:
     HAS_LIBS = False
 
 
 # ==========================================
-#              ComfyUI 节点定义
+#              节点定义
 # ==========================================
 
 @register_node("OMEZarrReader")
@@ -46,14 +55,12 @@ class OMEZarrReader:
     RETURN_NAMES = ("dask_arr", "metadata")
     FUNCTION = "load_zarr"
 
-    # [新增] 接收 callback 参数用于发送日志
     def load_zarr(self, file_path, chunk_multiple=1, callback=None):
         if not file_path:
             raise ValueError("❌ 文件路径不能为空")
 
         file_path = os.path.abspath(file_path.strip())
 
-        # [修改] 使用 callback 发送日志到前端
         if callback:
             callback(0, 100, f"Reading: {file_path}")
 
@@ -82,14 +89,12 @@ class OMEZarrReader:
 
             native_chunks = z_arr.chunks
 
-            # [修改] 发送切块日志
             if callback:
                 callback(10, 100, f"Native Chunks: {native_chunks}")
 
             if chunk_multiple < 1: chunk_multiple = 1
             new_chunks = tuple(c * chunk_multiple for c in native_chunks)
 
-            # [修改] 发送调度日志
             if callback:
                 callback(20, 100, f"Dask Chunks: {new_chunks} ({chunk_multiple}x)")
 
@@ -173,8 +178,9 @@ class OMEZarrWriter:
     RETURN_NAMES = ("saved_path",)
     FUNCTION = "save_zarr"
 
-    async def save_zarr(self, dask_arr, metadata, compression, output_path="", callback=None):
-        if not HAS_LIBS: raise ImportError("缺少必要库")
+    async def save_zarr(self, dask_arr, metadata, compression, output_path="", callback=None,
+                        global_progress_callback=None):
+        if not HAS_LIBS: raise ImportError("缺少必要库: dask, zarr, numcodecs")
         if metadata is None: metadata = {}
 
         # 1. 自动路径逻辑
@@ -182,6 +188,7 @@ class OMEZarrWriter:
             source = metadata.get("source_path", "")
             if source and "mock://" not in source:
                 lower_source = source.lower()
+                # [还原] 原始的健壮逻辑
                 if ".zarr" in lower_source:
                     zarr_end_idx = lower_source.rfind(".zarr") + 5
                     zarr_root = source[:zarr_end_idx]
@@ -193,6 +200,7 @@ class OMEZarrWriter:
                     parent_dir = os.path.dirname(source_clean)
                     base_name = os.path.basename(source_clean)
                     name_only = os.path.splitext(base_name)[0]
+
                 output_path = os.path.join(parent_dir, f"{name_only}_processed.zarr")
             else:
                 output_path = "output_processed.zarr"
@@ -201,18 +209,20 @@ class OMEZarrWriter:
         if callback: callback(0, 100, f"Target: {abs_path}")
 
         main_loop = asyncio.get_running_loop()
-
-        # 计算块数
         total_chunks = dask_arr.npartitions
 
-        # 定义阻塞函数
-        def run_dask_with_monitor():
-            import time
+        # 2. 核心执行逻辑
+        def run_task():
             import shutil
 
             # [稳健获取 Client]
+            # 这里的 import 位于函数内部，且 sys.path 已经在文件头部修正，所以一定能找到
             try:
-                # 尝试从 dask_manager 获取
+                from dask_monitor import monitor_dask_progress
+            except ImportError:
+                monitor_dask_progress = None
+
+            try:
                 from dask_manager import get_client
                 client = get_client()
             except ImportError:
@@ -229,16 +239,17 @@ class OMEZarrWriter:
                 except:
                     pass
 
-            # 准备压缩
+            # [还原] 压缩参数设置
             if compression == "zstd":
                 compressor = numcodecs.Blosc(cname='zstd', clevel=5, shuffle=numcodecs.Blosc.BITSHUFFLE)
             else:
                 compressor = numcodecs.Blosc(cname='lz4', clevel=5, shuffle=numcodecs.Blosc.SHUFFLE)
 
-            if client:
-                if callback: callback(-1, 100, f"Submitting {total_chunks} chunks to Dask...")
+            # --- 分支 A: Dask 集群计算 (带进度监控) ---
+            if client and monitor_dask_progress:
+                if callback: callback(-1, 100, f"Submitting {total_chunks} chunks...")
 
-                # 仅生成图
+                # 构建图
                 delayed_task = dask_arr.to_zarr(
                     abs_path,
                     compressor=compressor,
@@ -246,37 +257,21 @@ class OMEZarrWriter:
                     compute=False
                 )
 
-                # 提交计算
+                # 提交
                 future = client.compute(delayed_task)
 
-                # 轮询逻辑
-                while not future.done():
-                    try:
-                        info = client.scheduler_info()
-                        workers = len(info['workers'])
-                        processing = sum(len(w['processing']) for w in info['workers'].values())
-
-                        # 这个消息会被前端 FlowContext.tsx 的 isSpam 过滤，不会进 Log
-                        # 但是会更新节点上的灵动岛 UI
-                        msg = f"Dask Running | Workers: {workers} | Active Chunks: {processing}"
-                    except Exception as e:
-                        msg = f"Dask Running..."
-
-                    if callback:
-                        callback(-1, 100, msg)
-
-                    time.sleep(0.5)
-
-                if future.status == 'error':
-                    future.result()
+                # [核心] 阻塞并广播进度
+                monitor_dask_progress(client, future, callback, global_progress_callback)
 
                 if callback: callback(100, 100, "Dask Task Completed!")
 
+            # --- 分支 B: 本地回退 (保持原样) ---
             else:
-                if callback: callback(-1, 100, "Local fallback (slow)...")
+                if callback: callback(-1, 100, "Local fallback (slow/no-progress)...")
                 dask_arr.to_zarr(abs_path, compressor=compressor, overwrite=True)
+                if callback: callback(100, 100, "Local Task Completed!")
 
-            # 补写元数据
+            # [还原] 补写元数据
             try:
                 z = zarr.open(abs_path, mode='r+')
                 z.attrs["multiscales"] = [{
@@ -287,5 +282,5 @@ class OMEZarrWriter:
             except:
                 pass
 
-        await main_loop.run_in_executor(None, run_dask_with_monitor)
+        await main_loop.run_in_executor(None, run_task)
         return (abs_path,)
