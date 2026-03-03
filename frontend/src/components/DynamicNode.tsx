@@ -95,7 +95,7 @@ interface ControlWidgetProps {
 const WIDGET_REGISTRY: Record<string, React.ComponentType<ControlWidgetProps>> = {};
 
 // ==========================================
-// 4. 主控组件：ControlWidget (修复：添加 stopPropagation)
+// 4. 主控组件：ControlWidget
 // ==========================================
 const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) => {
   const [type, options] = config;
@@ -110,7 +110,7 @@ const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) =>
 
   const handlePopupOpen = () => { if (containerRef.current) { setAnchorRect(containerRef.current.getBoundingClientRect()); } setShowPopup(true); };
 
-  // [修复] 阻止冒泡，防止双击输入框时折叠节点
+  //  阻止冒泡，防止双击输入框时折叠节点
   const stopProp = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
 
   // A. Boolean
@@ -238,7 +238,7 @@ const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) =>
 const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
   const { nodeSpec, values = {}, progress, message } = data || {};
 
-  const { updateNodeData, connectingType } = useFlow();
+  const { updateNodeData} = useFlow();
   const [collapsed, setCollapsed] = useState(false);
 
   const valuesRef = useRef<Record<string, unknown>>(values);
@@ -249,7 +249,7 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
 
   const handleUpdate = useCallback((key: string, v: unknown) => {
     updateNodeData(id, { values: { ...valuesRef.current, [key]: v } });
-  }, [id, updateNodeData, valuesRef]);
+  }, [id, updateNodeData]);
 
   const { linkInputs, widgets, outputs } = useMemo(() => {
     if (!nodeSpec) return { linkInputs: [], outputs: [], widgets: [] };
@@ -281,7 +281,7 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
       });
     }
     return { linkInputs: links, outputs: outs, widgets: wids };
-  }, [nodeSpec, TYPE_COLORS]);
+  }, [nodeSpec]);
 
 
   const isRunning = progress !== undefined && progress > 0 && progress < 100;
