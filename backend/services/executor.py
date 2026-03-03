@@ -3,12 +3,11 @@ import traceback
 import inspect
 import logging
 import dask
-import dask.array as da
 
 from dask_manager import bind_layers_to_node
-from registry import NODE_CLASS_MAPPINGS
+from backend.core.registry import NODE_CLASS_MAPPINGS
 # [新增] 引入状态管理器
-from state_manager import state_manager
+from backend.core.state_manager import state_manager
 
 logger = logging.getLogger("BrainFlow.Executor")
 
