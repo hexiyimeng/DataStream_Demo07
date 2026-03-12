@@ -1,8 +1,23 @@
 # registry.py
-from typing import Dict, Type
+from typing import Dict, Type, Literal
+from core.logger import logger
+from enum import Enum
 
 NODE_CLASS_MAPPINGS: Dict[str, Type] = {}
 NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
+
+
+class ProgressType(Enum):
+    """
+    节点进度报告类型。
+
+    - CHUNK_COUNT: 节点有真实的 chunk 数量，可以报告准确的百分比进度（如 Cellpose）
+    - STATE_ONLY: 节点只有状态信息，没有百分比进度（如 ROI、Reader）
+    - STAGE_BASED: 节点有多个阶段，每个阶段报告状态（如 Stats）
+    """
+    CHUNK_COUNT = "chunk_count"
+    STATE_ONLY = "state_only"
+    STAGE_BASED = "stage_based"
 
 
 def register_node(name: str):
@@ -32,7 +47,7 @@ def get_node_info():
             try:
                 input_config = cls.INPUT_TYPES()
             except Exception as e:
-                print(f"Error getting input types for {name}: {e}")
+                logger.error(f"Error getting input types for {name}: {e}")
                 input_config = {"required": {}, "optional": {}}
         else:
             input_config = {"required": {}, "optional": {}}
@@ -52,8 +67,21 @@ def get_node_info():
         display_name = getattr(cls, "DISPLAY_NAME", name)
         description = cls.__doc__.strip() if cls.__doc__ else "No description."
 
+        # 4. 获取进度类型（兼容字符串和枚举）
+        progress_type_attr = getattr(cls, "PROGRESS_TYPE", None)
+        if progress_type_attr is None:
+            logger.warning(f"Node {name} has no PROGRESS_TYPE attribute, using default STATE_ONLY")
+            progress_type_value = ProgressType.STATE_ONLY.value
+        elif isinstance(progress_type_attr, str):
+            # 如果是字符串，直接使用
+            progress_type_value = progress_type_attr
+        else:
+            # 如果是枚举对象，获取其 value
+            progress_type_value = progress_type_attr.value
+
         info[name] = {
             "name": name,
+            "type": name,  # 前端期望 type 字段，与 name 相同以保持兼容性
             "display_name": display_name,
             "category": category,
             "description": description,
@@ -61,6 +89,8 @@ def get_node_info():
             "output": return_types,
             "output_name": return_names,
             # 告诉前端这个节点实际执行哪个函数（虽然前端不一定用，但这是协议的一部分）
-            "output_node": getattr(cls, "OUTPUT_NODE", False)
+            "output_node": getattr(cls, "OUTPUT_NODE", False),
+            # 进度报告类型：chunk_count / state_only / stage_based
+            "progress_type": progress_type_value
         }
     return info

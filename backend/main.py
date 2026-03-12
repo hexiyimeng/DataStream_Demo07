@@ -1,133 +1,147 @@
 import logging
 import os
-import sys
-import importlib
-import asyncio as _real_asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+import asyncio
+import mimetypes
 from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, Response
 
-from dask_manager import start_dask_cluster, stop_dask_cluster, get_client
-from registry import get_node_info
-from executor import execute_graph
-# 引入状态管理器
-from state_manager import state_manager
+# 确保在最开始初始化 mimetypes，强制修正 Windows 可能的注册表错误
+mimetypes.init()
+mimetypes.add_type('application/javascript', '.js')
+mimetypes.add_type('application/javascript', '.mjs')
+mimetypes.add_type('text/css', '.css')
 
-asyncio = _real_asyncio
-os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
+# 引入项目核心组件
+from services.dask_service import dask_service
+from services.plugin_loader import load_all_plugins
+from core.state_manager import state_manager
 
+# 引入路由模块
+from api.http_routes import router as http_router
+from api.websocket import router as ws_router
+
+# 配置全局日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("Flow")
+logger = logging.getLogger("BrainFlow.Main")
 
 
+# ==========================================
+# 1. 核心修复：自定义静态资源托管类
+# ==========================================
+class TypedStaticFiles(StaticFiles):
+    """
+    针对 Windows 部署的增强版静态文件服务。
+    强制为 .js 和 .css 文件设置正确的 MIME 类型，绕过系统注册表污染。
+    """
+
+    def file_response(self, full_path: str, stat_result: os.stat_result, scope, status_code: int = 200) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        # 强制拦截并修正 MIME 类型
+        if full_path.endswith(".js"):
+            response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+        elif full_path.endswith(".css"):
+            response.headers["Content-Type"] = "text/css; charset=utf-8"
+        return response
+
+
+# ==========================================
+# 2. 生命周期管理 (lifespan)
+# ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. 启动时记录日志到状态管理器
+    # 启动时：初始化系统状态
     state_manager.add_log(">>> Backend Starting...", "info")
 
-    client = start_dask_cluster()
+    # =========================================================
+    # [关键修复] 第一步：先加载插件代码 (Import torch/cellpose)
+    # 确保主进程在 Dask Worker 启动前完成库的加载，避免 GPU 锁死
+    # =========================================================
+    try:
+        load_all_plugins()
+        state_manager.add_log("✅ Plugins Loaded Successfully.", "success")
+    except Exception as e:
+        logger.error(f"Plugin load failed: {e}")
+        state_manager.add_log(f"❌ Plugin load failed: {e}", "error")
+
+    # =========================================================
+    # [关键修复] 第二步：再启动 Dask 集群
+    # 此时主进程资源已就绪，Worker 启动不会造成冲突
+    # =========================================================
+    client = dask_service.start_cluster()
     if client:
-        # 同时打印到控制台(通过logger)和记录到buffer(通过add_log)
-        logger.info(f"Dask Dashboard: {client.dashboard_link}")
-        state_manager.add_log(f"Dask Cluster Ready. Dashboard: {client.dashboard_link}", "success")
+        state_manager.add_log(f"Dask Cluster Ready: {client.dashboard_link}", "success")
+        logger.info(f"Dask Dashboard available at: {client.dashboard_link}")
     else:
-        state_manager.add_log("Dask Cluster failed. Running in local mode.", "warning")
+        state_manager.add_log("Dask Cluster failed. Local mode.", "warning")
 
     yield
 
-    # 2. 关闭
-    logger.info("<<< Backend Shutting down...")
-    stop_dask_cluster()
+    # 关闭时：清理资源
+    state_manager.add_log("<<< Backend Shutting down...", "warning")
+    dask_service.stop_cluster()
 
 
-app = FastAPI(title="Flow Backend", lifespan=lifespan)
+# ==========================================
+# 3. 创建应用实例
+# ==========================================
+app = FastAPI(title="BrainFlow Backend", lifespan=lifespan)
 
+# 配置 CORS 允许前端跨域访问
+# 允许多个开发端口：5173, 5174 等
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("BRAINFLOW_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# 注册业务 API 路由
+app.include_router(http_router)
+app.include_router(ws_router)
 
-# 加载插件
-def load_all_plugins():
-    logger.info("Loading plugins...")
-    nodes_dir = os.path.join(os.path.dirname(__file__), "nodes")
-    if os.path.exists(nodes_dir):
-        if nodes_dir not in sys.path: sys.path.append(nodes_dir)
-        for filename in os.listdir(nodes_dir):
-            if filename.endswith(".py") and filename != "__init__.py":
-                try:
-                    module_name = filename[:-3]
-                    if os.path.exists(os.path.join(nodes_dir, "__init__.py")):
-                        importlib.import_module(f"nodes.{module_name}")
-                    else:
-                        importlib.import_module(module_name)
-                    logger.info(f"Extension Loaded: {module_name}")
-                except Exception as e:
-                    logger.error(f"Failed to load: {e}")
-    else:
-        logger.info("No 'nodes/' directory found.")
+# ==========================================
+# 4. 前端静态资源托管 (单页应用 SPA 模式)
+# ==========================================
+# 定位 dist 文件夹路径（假设 dist 与 main.py 在同级目录）
+dist_dir = os.path.join(os.path.dirname(__file__), "dist")
+
+if os.path.exists(dist_dir):
+    # 挂载 /assets 目录下的编译资源 (JS/CSS)
+    # 使用自定义的 TypedStaticFiles 以确保 MIME 类型正确
+    assets_dir = os.path.join(dist_dir, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", TypedStaticFiles(directory=assets_dir), name="assets")
 
 
-load_all_plugins()
+    # 处理单页应用路由：任何非 API 请求都回退到 index.html
+    @app.get("/{full_path:path}")
+    async def serve_react_app(full_path: str):
+        file_path = os.path.join(dist_dir, full_path)
 
+        # 如果请求的是物理存在的文件（如图标、json等），直接返回
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            media_type = None
+            if file_path.endswith(".js"): media_type = "application/javascript"
+            if file_path.endswith(".css"): media_type = "text/css"
+            return FileResponse(file_path, media_type=media_type)
 
-@app.get("/object_info")
-async def get_node_definitions():
-    return get_node_info()
+        # 否则返回 index.html，让 React Router 接管路由
+        return FileResponse(os.path.join(dist_dir, "index.html"))
+else:
+    logger.warning("⚠️ 警告: 未检测到 'dist' 文件夹。请先在前端运行 'npm run build'。")
 
+# ==========================================
+# 5. 启动入口
+# ==========================================
+if __name__ == "__main__":
+    import uvicorn
 
-@app.websocket("/ws/run")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    client_ip = websocket.client.host
-    logger.info(f"Client connected: {client_ip}")
+    # 在 Windows 上设置 MALLOC_TRIM_THRESHOLD_ 环境变量（虽然主要针对 Linux 内存回收）
+    os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
 
-    # [核心变更] 注册客户端 -> 自动发送历史日志和进度
-    await state_manager.register_client(websocket)
-
-    try:
-        while True:
-            data = await websocket.receive_json()
-            command = data.get("command")
-
-            if command == "execute_graph":
-                # 如果有旧任务，先取消 (或者你可以选择排队，这里简化为替换)
-                if state_manager.current_task and not state_manager.current_task.done():
-                    state_manager.add_log("Cancelling previous task for new request...", "warning")
-                    state_manager.current_task.cancel()
-                    try:
-                        await state_manager.current_task
-                    except asyncio.CancelledError:
-                        pass
-
-                graph = data.get("graph")
-                if graph:
-                    logger.info(f"Starting execution for {client_ip}")
-                    # 任务存入全局状态
-                    state_manager.current_task = asyncio.create_task(execute_graph(graph))
-                else:
-                    await websocket.send_json({"type": "error", "message": "Graph data is empty"})
-
-            elif command == "stop_execution":
-                # 只有显式发送 stop 指令才取消任务
-                if state_manager.current_task and not state_manager.current_task.done():
-                    logger.info("Received Stop Command.")
-                    state_manager.current_task.cancel()
-                    # executor 会捕获 CancelledError 并广播日志
-                else:
-                    await websocket.send_json({"type": "log", "message": "No active execution."})
-
-            elif command == "ping":
-                await websocket.send_json({"type": "pong"})
-
-    except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {client_ip}")
-        # [核心变更] 断开时只注销，任务继续在后台跑！
-        state_manager.unregister_client(websocket)
-
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}", exc_info=True)
+    # 运行服务
+    uvicorn.run(app, host="0.0.0.0", port=8000)

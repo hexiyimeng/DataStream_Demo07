@@ -1,8 +1,8 @@
 import asyncio
 import logging
-import json
 from collections import deque
 from typing import Dict, Set, Optional
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger("BrainFlow.State")
 
@@ -17,97 +17,91 @@ class GlobalStateManager:
         return cls._instance
 
     def init(self):
-        # 1. 核心任务引用 (防止 disconnect 后丢失)
+        # 核心任务控制
         self.current_task: Optional[asyncio.Task] = None
         self.is_running = False
 
-        # 2. 状态缓存
-        # 记录每个节点的最后已知进度 { "NodeID": {progress: 50, message: "..."} }
+        # 状态与日志缓存
         self.node_states: Dict[str, Dict] = {}
-
-        # 3. 日志缓存 (只保留最近 100 条，防止内存无限增长)
         self.log_buffer = deque(maxlen=100)
 
-        # 4. 当前连接的客户端 (用于广播)
+        # 活跃客户端维护
         self.active_websockets: Set = set()
 
     async def register_client(self, websocket):
-        """新客户端连接时调用：建立连接并立即回放历史状态"""
+        """客户端建立连接时的状态同步逻辑"""
         self.active_websockets.add(websocket)
-        logger.info(
-            f"Client Registered. Syncing {len(self.log_buffer)} logs and {len(self.node_states)} node states...")
 
         try:
-            # === A. 回放历史日志 ===
+            # 1. 批量回放历史日志
             for log_entry in self.log_buffer:
-                await websocket.send_json(log_entry)
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json(log_entry)
+                else:
+                    return
 
-            # === B. 回放节点进度 (让进度条跳变) ===
+            # 2. 同步节点进度状态
             for node_id, state in self.node_states.items():
-                await websocket.send_json({
-                    "type": "progress",
-                    "taskId": node_id,
-                    "progress": state['progress'],
-                    "message": state['message']
-                })
-
-            # === C. 同步运行状态 ===
-            if self.is_running:
-                await websocket.send_json({"type": "log", "message": ">>> Reconnected to active session."})
-            elif self.current_task and self.current_task.done():
-                await websocket.send_json({"type": "done", "message": "Previous workflow finished."})
+                if websocket.client_state == WebSocketState.CONNECTED:
+                    await websocket.send_json({
+                        "type": "progress",
+                        "taskId": node_id,
+                        "progress": state['progress'],
+                        "message": state['message']
+                    })
+                else:
+                    return
 
         except Exception as e:
-            logger.error(f"Error syncing state to new client: {e}")
-            self.active_websockets.discard(websocket)
+            logger.debug(f"Sync interrupted during registration: {e}")
+            self.unregister_client(websocket)
 
     def unregister_client(self, websocket):
-        """客户端断开时调用，只移除列表，不停止任务"""
+        """移除断开连接的客户端"""
         if websocket in self.active_websockets:
             self.active_websockets.remove(websocket)
 
     def add_log(self, message, level="info"):
-        """记录日志并存入 buffer，返回消息对象供广播"""
+        """记录日志到缓冲区"""
         entry = {"type": "log", "message": message}
-        if level == "error":
-            entry["type"] = "error"
-        elif level == "success":
-            entry["type"] = "success"
-        elif level == "warning":
-            entry["type"] = "warning"
+        if level in ["error", "success", "warning"]:
+            entry["type"] = level
 
         self.log_buffer.append(entry)
         return entry
 
     def update_progress(self, node_id, progress, message):
-        """更新节点进度缓存"""
+        """更新并缓存节点进度"""
         self.node_states[node_id] = {
             "progress": progress,
             "message": message
         }
 
     async def broadcast(self, message_dict):
-        """广播给所有连接的客户端"""
+        """向所有活跃客户端发送消息，具备自动清理机制"""
         if not self.active_websockets:
             return
 
-        # 移除已关闭的脏连接
-        to_remove = set()
-        for ws in self.active_websockets:
+        bad_sockets = []
+        for ws in list(self.active_websockets):
             try:
-                await ws.send_json(message_dict)
+                # 仅在连接处于 CONNECTED 状态时发送数据
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(message_dict)
+                else:
+                    bad_sockets.append(ws)
             except Exception:
-                to_remove.add(ws)
+                bad_sockets.append(ws)
 
-        self.active_websockets -= to_remove
+        # 清理失效的连接句柄
+        for ws in bad_sockets:
+            self.unregister_client(ws)
 
     def clear_state(self):
-        """每次点击 RUN 时清空旧状态，开始新的一轮"""
+        """执行新任务前重置运行状态"""
         self.node_states.clear()
         self.log_buffer.clear()
-        # 保留 active_websockets，因为人还在
         self.is_running = True
 
 
-# 全局单例导出
 state_manager = GlobalStateManager()

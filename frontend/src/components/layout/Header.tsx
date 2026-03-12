@@ -1,4 +1,4 @@
-import { useRef, type ChangeEvent } from 'react';
+import { useRef, useState, useEffect, type ChangeEvent } from 'react';
 import { useReactFlow, getNodesBounds, getViewportForBounds } from '@xyflow/react';
 import { useFlow } from '../../hooks/useFlowContext';
 
@@ -8,17 +8,40 @@ const LoadIcon = () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentC
 const SaveIcon = () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>;
 const PlusIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>;
 const XIcon = () => <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>;
+const DaskIcon = () => <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>;
 
 export default function Header() {
   const {
     theme, toggleTheme,
     workflows, activeWorkflowId,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow,
-    runFlow, stopFlow, setNodes, setEdges
+    runFlow, stopFlow, setNodes, setEdges, isConnected,
+    nodeDefs  // ← 获取最新的节点定义
   } = useFlow();
 
   const reactFlowInstance = useReactFlow();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dashboardUrl, setDashboardUrl] = useState<string>('');
+
+  // 获取实际的 Dask Dashboard URL
+  useEffect(() => {
+    const fetchDashboardUrl = async () => {
+      if (!isConnected) return;
+      try {
+        const apiUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/dashboard_url`;
+        const response = await fetch(apiUrl);
+        const data = await response.json();
+        if (data.dashboard_url) {
+          // 确保 URL 以 /status 结尾，这样可以直接打开到状态页面
+          const url = data.dashboard_url.endsWith('/status') ? data.dashboard_url : `${data.dashboard_url}/status`;
+          setDashboardUrl(url);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch dashboard URL:', err);
+      }
+    };
+    fetchDashboardUrl();
+  }, [isConnected]);
 
   // === 1. 保存逻辑 (自动使用当前标签名) ===
   const handleSave = () => {
@@ -74,13 +97,67 @@ export default function Header() {
           setNodes([]);
           setEdges([]);
 
-          // 3. 延迟一下再设置新数据，或者直接设置
-          // 注意：这里建议把 viewport 操作放在 requestAnimationFrame 或 setTimeout 里
+          // 3. 延迟一下再设置新数据
           setTimeout(() => {
-              setNodes(flow.nodes);
+              const invalidNodes: string[] = [];
+              const updatedNodes: string[] = [];
+
+              // 关键修复：使用最新的 nodeDefs 更新节点的 nodeSpec
+              const processedNodes = flow.nodes.map((node: any) => {
+                  const opType = node.data?.opType;
+                  const latestSpec = nodeDefs[opType];
+
+                  if (!latestSpec) {
+                      // 节点不存在了！
+                      invalidNodes.push(opType);
+                      console.warn(`[Load] 节点类型 '${opType}' 在后端不存在`);
+
+                      // 用旧的 nodeSpec，但标记为无效
+                      return {
+                          ...node,
+                          data: {
+                              ...node.data,
+                              nodeSpec: node.data?.nodeSpec || { display_name: opType, input: {}, output: [] },
+                              _invalid: true,
+                              _warning: `节点 '${opType}' 已被后端移除，请手动替换`
+                          }
+                      };
+                  }
+
+                  // 节点存在，使用最新定义
+                  updatedNodes.push(opType);
+
+                  return {
+                      ...node,
+                      data: {
+                          ...node.data,
+                          nodeSpec: latestSpec,  // 使用最新的节点定义
+                          _invalid: undefined,
+                          _warning: undefined
+                      }
+                  };
+              });
+
+              setNodes(processedNodes);
               setEdges(flow.edges);
 
-              // 4. 安全地重命名 (加个判断)
+              // 4. 显示加载结果提示
+              let message = `工作流已加载，包含 ${processedNodes.length} 个节点`;
+              if (updatedNodes.length > 0) {
+                  message += `（${updatedNodes.length} 个节点已更新为最新版本）`;
+              }
+              if (invalidNodes.length > 0) {
+                  message += `\n⚠️ 警告：${invalidNodes.length} 个节点已失效 (${invalidNodes.join(', ')})`;
+              }
+
+              console.log(`[Load] ${message}`);
+
+              // 如果有失效节点，也弹出警告
+              if (invalidNodes.length > 0) {
+                  alert(message);
+              }
+
+              // 5. 安全地重命名 (加个判断)
               if (flow.workflow_name && activeWorkflowId) {
                  try {
                     renameWorkflow(activeWorkflowId, flow.workflow_name);
@@ -89,9 +166,8 @@ export default function Header() {
                  }
               }
 
-              // 5. 调整视图
-              const bounds = getNodesBounds(flow.nodes);
-              // 注意：如果 bounds 无效(比如节点还没渲染)，viewport 可能会计算出 NaN
+              // 6. 调整视图
+              const bounds = getNodesBounds(processedNodes);
               if (bounds && bounds.width > 0) {
                  const { x, y, zoom } = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
                  reactFlowInstance.setViewport({ x, y, zoom });
@@ -99,7 +175,6 @@ export default function Header() {
           }, 0);
 
         } catch (error) {
-          // 关键：打印出真正的错误对象，不要只弹窗
           console.error("加载工作流详细错误: ", error);
           alert(`无法加载工作流: ${(error as Error).message}`);
         }
@@ -179,8 +254,23 @@ export default function Header() {
         <button
           onClick={toggleTheme}
           className="w-7 h-7 rounded bg-[var(--widget-bg)] hover:bg-[var(--node-body)] text-[var(--text-sub)] flex items-center justify-center transition-colors"
+          title="Toggle Theme"
         >
           {theme === 'dark' ? <MoonIcon /> : <SunIcon />}
+        </button>
+
+        <button
+          onClick={() => {
+            if (!dashboardUrl) {
+              alert('Dashboard not available. Please check if backend is connected.');
+              return;
+            }
+            window.open(dashboardUrl, '_blank');
+          }}
+          className="w-7 h-7 rounded bg-[var(--widget-bg)] hover:bg-[var(--node-body)] text-[var(--text-sub)] flex items-center justify-center transition-colors"
+          title="Open Dask Scheduler Dashboard"
+        >
+          <DaskIcon />
         </button>
 
         <div className="h-4 w-[1px] bg-[var(--node-border)] mx-1"></div>

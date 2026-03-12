@@ -236,7 +236,10 @@ const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) =>
 // 5. 核心节点组件：DynamicNode
 // ==========================================
 const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
-  const { nodeSpec, values = {}, progress, message } = data || {};
+  const { nodeSpec, values = {}, progress, message, _invalid, _warning } = data || {};
+
+  // 获取节点的进度报告类型
+  const progressType = nodeSpec?.progress_type || 'state_only';
 
   const { updateNodeData} = useFlow();
   const [collapsed, setCollapsed] = useState(false);
@@ -284,28 +287,62 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
   }, [nodeSpec]);
 
 
-  const isRunning = progress !== undefined && progress > 0 && progress < 100;
-  const isIndeterminate = progress === -1;
-  const isComplete = progress === 100;
+  // 根据新的进度协议判断节点状态
+  // progress 为 null 表示 state_only（无百分比进度）
+  const progressValue = progress ?? 0;
+  const isRunning = progressValue > 0 && progressValue < 100;
+  const isIndeterminate = progress === null || progress === -1;
+  const isComplete = progressValue === 100;
   const isError = message?.toLowerCase().includes('error');
+  // 只为 chunk_count 类型的节点显示百分比
+  const showPercentage = progressType === 'chunk_count' && progress !== null;
+
+  // 调试日志
+  useEffect(() => {
+    console.log(`[DynamicNode] ${nodeSpec?.display_name || 'Unknown'}:`, {
+      progress,
+      progressType,
+      showPercentage,
+      message,
+      isRunning,
+      isComplete,
+      isIndeterminate,
+      'shouldShowFooter': !collapsed && (isRunning || isIndeterminate || message),
+      'shouldShowProgressBar': showPercentage && (isRunning || isIndeterminate),
+      'shouldShowPercentage': showPercentage && (isRunning || isComplete)
+    });
+  }, [progress, progressType, showPercentage, message, nodeSpec, isRunning, isComplete, isIndeterminate, collapsed]);
+
   return (
     <>
       <NodeResizer color="#3b82f6" isVisible={!!selected && !collapsed} minWidth={220} minHeight={60} />
 
-      <div className={`node-wrapper relative rounded-[4px] shadow-md bg-[var(--node-body)] transition-all group flex flex-col 
-          ${selected ? 'border-[#eee] ring-1 ring-[#eee]/30' : 'border-[var(--node-border)]'} 
+      <div className={`node-wrapper relative rounded-[4px] shadow-md bg-[var(--node-body)] transition-all group flex flex-col
+          ${selected ? 'border-[#eee] ring-1 ring-[#eee]/30' : 'border-[var(--node-border)]'}
+          ${_invalid ? 'border-orange-500 ring-2 ring-orange-500/50' : ''}
           ${isError ? 'border-red-500 shadow-red-500/30' : 'border'}`}
       >
         {/* Header (始终显示) */}
         <div
-          className="relative h-6 px-2 flex items-center justify-between bg-[var(--node-header)] border-b border-[var(--node-border)] z-10 rounded-t-[4px] shrink-0 cursor-pointer select-none"
+          className={`relative h-6 px-2 flex items-center justify-between bg-[var(--node-header)] border-b border-[var(--node-border)] z-10 rounded-t-[4px] shrink-0 cursor-pointer select-none
+            ${_invalid ? 'bg-orange-900/20' : ''}`}
           onDoubleClick={(e) => { e.stopPropagation(); setCollapsed(!collapsed); }}
         >
-           <span className="text-[11px] font-bold text-[var(--text-head)] truncate mr-2">{nodeSpec.display_name}</span>
+           <span className={`text-[11px] font-bold ${_invalid ? 'text-orange-500' : 'text-[var(--text-head)]'} truncate mr-2`}>
+             {nodeSpec?.display_name || data.opType || 'Unknown'}
+           </span>
            <div className="flex items-center gap-1.5">
-             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors ${isError ? 'bg-red-500' : isComplete ? 'bg-green-500' : (isRunning || isIndeterminate) ? 'bg-yellow-400' : 'bg-[#444]'}`} />
+             {_invalid && <span className="text-[10px] text-orange-500 font-bold">⚠️</span>}
+             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors ${_invalid ? 'bg-orange-500' : isError ? 'bg-red-500' : isComplete ? 'bg-green-500' : (isRunning || isIndeterminate) ? 'bg-yellow-400' : 'bg-[#444]'}`} />
            </div>
         </div>
+
+        {/* Invalid 节点警告 */}
+        {_invalid && !collapsed && (
+          <div className="px-2 py-1 bg-orange-900/20 border-b border-orange-500/30 text-[9px] text-orange-400">
+            ⚠️ {_warning || '节点已失效，请手动替换'}
+          </div>
+        )}
 
         {/* Body (使用 Grid 动画折叠，保留 DOM) */}
         <div className={`node-collapse-wrapper ${collapsed ? 'collapsed' : ''}`}>
@@ -354,20 +391,18 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
            </div>
         </div>
 
-        {/* Footer (进度条) - 放在 Grid 外面或者里面都可以，这里放在外面更清晰 */}
+        {/* Footer (进度条) - 根据 progress_type 显示不同的 UI */}
         {(!collapsed && (isRunning || isIndeterminate || message)) && (
           <div className="relative mt-auto">
-             {/* ... 你的进度条代码 ... */}
-             <div className="h-1 bg-[var(--widget-bg)] w-full overflow-hidden relative">
-                 {isIndeterminate ? (
-                   <div className="absolute inset-0 w-full h-full animate-shimmer bg-gradient-to-r from-transparent via-green-400 to-transparent opacity-80" />
-                 ) : (
-                   <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${progress}%` }} />
-                 )}
-             </div>
-             <div className="px-2 py-1 flex justify-between text-[9px] font-mono border-t border-[var(--node-border)] bg-[var(--node-body)] text-[var(--text-sub)]">
-                <span className="truncate max-w-[80%]">{message || "Running..."}</span>
-                <span>{isRunning ? `${Math.floor(progress)}%` : ''}</span>
+             {/* 只为 chunk_count 类型的节点显示进度条 */}
+             {showPercentage && (
+               <div className="h-1 bg-[var(--widget-bg)] w-full overflow-hidden relative">
+                   <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
+               </div>
+             )}
+             <div className={`px-2 py-1 flex justify-between text-[9px] font-mono border-t border-[var(--node-border)] bg-[var(--node-body)] text-[var(--text-sub)] ${!showPercentage ? 'text-center' : ''}`}>
+                <span className={`truncate ${!showPercentage ? 'mx-auto' : 'max-w-[80%]'}`}>{message || "Running..."}</span>
+                {showPercentage && (isRunning || isComplete) && <span>{Math.floor(progressValue)}%</span>}
              </div>
           </div>
         )}

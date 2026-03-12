@@ -3,6 +3,13 @@ import type { Node, Edge } from '@xyflow/react';
 import type { NodeData, WSMessage, NodeSpec, LogEntry } from '../types';
 
 // WebSocket 通信、缓冲队列 (Tick Loop) 和执行逻辑
+// 进度缓冲类型定义
+interface ProgressBufferEntry {
+  progress: number | null;
+  progressType: 'chunk_count' | 'state_only' | 'stage_based';
+  message: string;
+}
+
 export const useFlowEngine = (
   nodes: Node<NodeData>[],
   edges: Edge[],
@@ -14,11 +21,12 @@ export const useFlowEngine = (
   const [nodeDefs, setNodeDefs] = useState<Record<string, NodeSpec>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
-  const progressBufferRef = useRef<Map<string, { progress: number; message?: string }>>(new Map());
+  const progressBufferRef = useRef<Map<string, ProgressBufferEntry>>(new Map());
+  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // Store interval ID for cleanup
 
   // 1. 获取节点定义 (Metadata)
   useEffect(() => {
-    fetch('http://localhost:8000/object_info')
+    fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/object_info`)
       .then(res => res.json())
       .then(setNodeDefs)
       .catch(err => addLog(`API Error: ${err}`, 'error'));
@@ -37,7 +45,7 @@ export const useFlowEngine = (
 
         // 2. 强制重置节点状态 (消除僵尸进度条)
         setNodes(nds => nds.map(n => {
-            // 只有那些看起来“正在运行”的节点才需要重置
+            // 只有那些看起来"正在运行"的节点才需要重置
             const isRunningState = (n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100) || n.data.message;
 
             if (isRunningState) {
@@ -60,7 +68,7 @@ export const useFlowEngine = (
   useEffect(() => {
     const connectWs = () => {
         // 只有后端开启时才能连上
-        const ws = new WebSocket('ws://localhost:8000/ws/run');
+        const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/run`);
 
         ws.onopen = () => {
             setIsConnected(true);
@@ -88,10 +96,14 @@ export const useFlowEngine = (
                 setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
             }
 
-            // 进度缓冲 (Buffer)
+            // 进度缓冲 (Buffer) - 区分状态型和百分比型进度
             if (msg.taskId) {
-               progressBufferRef.current.set(msg.taskId, { progress: msg.progress ?? 0, message: msg.message });
-               if (msg.message?.toLowerCase().includes("error")) addLog(`[${msg.taskId}] ${msg.message}`, 'error');
+               progressBufferRef.current.set(msg.taskId, {
+                 progress: msg.progress ?? null,
+                 progressType: msg.progressType ?? 'state_only',
+                 message: msg.message ?? ""
+               });
+               if (msg.message && msg.message.toLowerCase().includes("error")) addLog(`[${msg.taskId}] ${msg.message}`, 'error');
             }
 
             // 完成信号
@@ -99,8 +111,13 @@ export const useFlowEngine = (
                 progressBufferRef.current.clear();
                 addLog(msg.message || "Workflow Finished", 'success');
                 setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
-                // 强制刷新所有节点为完成状态
-                setNodes((nds) => nds.map(n => ({ ...n, className: '', data: { ...n.data, progress: 100, message: 'Done' } })));
+                // 只更新正在运行的节点为完成状态，不是所有节点
+                setNodes((nds) => nds.map(n => {
+                    const wasRunning = n.data.progress > 0 && n.data.progress < 100;
+                    return wasRunning
+                    ? { ...n, className: '', data: { ...n.data, progress: 100, message: 'Done' } }
+                    : n;
+                }));
             }
           } catch (err) { console.error('WS Error', err); }
         };
@@ -109,32 +126,76 @@ export const useFlowEngine = (
     connectWs();
 
     // 3. Tick Loop (React 性能优化的关键)
+    // 使用 ref 存储间隔 ID 以便在回调中清理
     const tick = setInterval(() => {
       if (progressBufferRef.current.size > 0) {
         const updates = new Map(progressBufferRef.current);
         progressBufferRef.current.clear(); // 清空缓冲
 
-        setNodes((nds) => nds.map((n) => {
-          if (updates.has(n.id)) {
-            const updateData = updates.get(n.id);
-            // 只有数据真的变了才更新，防止 React 渲染抖动
-            if (n.data.progress === updateData?.progress && n.data.message === updateData?.message) return n;
+        // 添加日志输出到控制台（调试用）
+        updates.forEach((data, nodeId) => {
+          const progressStr = data.progress !== null ? `${data.progress}%` : 'N/A (state only)';
+          console.log(`[Progress Update] Node ${nodeId}: ${progressStr} (${data.progressType}) - ${data.message}`);
+        });
 
-            return {
-                ...n,
-                // 只有进度 < 100 且 > 0 时才显示呼吸灯
-                className: updateData && updateData.progress < 100 && updateData.progress > 0
-                    ? 'node-running-pulse'
-                    : '',
-                data: { ...n.data, ...updateData }
-            };
-          }
-          return n;
-        }));
+        try {
+          setNodes((nds) => nds.map((n) => {
+            if (updates.has(n.id)) {
+              const updateData = updates.get(n.id);
+              // 比较逻辑：处理 progress 可能为 null 的情况
+              const oldProgress = n.data.progress;
+              const newProgress = updateData?.progress;
+              const oldMessage = n.data.message;
+              const newMessage = updateData?.message;
+
+              // 检查是否有实际变化
+              const progressChanged = oldProgress !== newProgress;
+              const messageChanged = oldMessage !== newMessage;
+
+              if (!progressChanged && !messageChanged) return n;
+
+              // 添加调试日志
+              console.log(`[useFlowEngine] Updating node ${n.id}:`, {
+                'oldProgress': oldProgress,
+                'newProgress': newProgress,
+                'oldMessage': oldMessage,
+                'newMessage': newMessage,
+                'hasNodeSpec': !!n.data.nodeSpec,
+                'progressType': updateData?.progressType
+              });
+
+              return {
+                  ...n,
+                  // 只有 chunk_count 类型且进度在 0-100 之间时才显示呼吸灯
+                  // state_only 类型 progress 为 null，不显示呼吸灯
+                  className: updateData?.progressType === 'chunk_count' &&
+                             updateData.progress !== null &&
+                             updateData.progress > 0 &&
+                             updateData.progress < 100
+                      ? 'node-running-pulse'
+                      : '',
+                  // 保持原有 nodeSpec，更新 progress（可能为 null）和 message
+                  data: {
+                    ...n.data,
+                    progress: newProgress ?? 0, // null 时使用 0
+                    message: newMessage ?? ""
+                  }
+              };
+            }
+            return n;
+          }));
+        } catch (error) {
+          console.error('[Tick Loop Error]', error);
+        }
       }
     }, 100); // 100ms 刷新率
 
-    return () => { wsRef.current?.close(); clearInterval(tick); };
+    tickIntervalRef.current = tick;
+
+    return () => {
+      wsRef.current?.close();
+      if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
+    };
   }, [setNodes, setEdges, addLog]);
 
   // 4. 执行 (Run)

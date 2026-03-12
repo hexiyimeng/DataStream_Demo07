@@ -1,30 +1,82 @@
 import numpy as np
-from registry import register_node
 import logging
+from functools import lru_cache
+from core.registry import register_node, ProgressType
+from utils.progress_helper import report_progress
 
-# 尝试导入 cellpose
-try:
+# 初始化日志
+logger = logging.getLogger("BrainFlow.Cellpose")
+
+@lru_cache(maxsize=4)
+def _get_cached_model(model_type: str, device_str: str):
+    """
+    使用 LRU 缓存模型，避免重复加载导致的显存溢出。
+    """
     from cellpose import models
     import torch
+    device = torch.device(device_str)
+    try:
+        # 尝试加载 CellposeModel (通用类)
+        model = models.CellposeModel(gpu=True, model_type=model_type, device=device)
+    except Exception as e:
+        logger.debug(f"CellposeModel 加载异常，尝试使用基础 Cellpose 类: {e}")
+        model = models.Cellpose(gpu=True, model_type=model_type, device=device)
+    return model
 
-    HAS_CELLPOSE = True
-except ImportError:
-    HAS_CELLPOSE = False
+# 将 segment_chunk 移到模块级别，使其可序列化
+def _segment_chunk(block, nid=None, m_type='cyto', diam=15.0, f_thresh=0.4, c_thresh=0.0, b_size=4):
+    """
+    处理单个 chunk 的 Cellpose 分割。
+    注意：这个函数必须在模块级别，以便 Dask 可以序列化。
+    """
+    # 检查块是否全空，优化计算负载
+    if np.all(block == 0):
+        if nid:
+            # 直接调用 report_progress，不传 client
+            report_progress(nid)
+        return np.zeros_like(block, dtype=np.uint16)
 
-try:
-    import dask.array as da
+    try:
+        import torch
+        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+        model = _get_cached_model(m_type, device_str)
 
-    HAS_DASK = True
-except ImportError:
-    HAS_DASK = False
+        # 配置计算参数
+        eval_kwargs = {
+            "diameter": diam,
+            "channels": [0, 0],
+            "do_3D": True,
+            "z_axis": 0,
+            "flow_threshold": f_thresh,
+            "cellprob_threshold": c_thresh,
+            "batch_size": b_size,
+            "progress": None  # 禁用内置进度条，它会阻塞
+        }
 
-logger = logging.getLogger("BrainFlow.Cellpose")
+        # 执行分割
+        masks, flows, styles = model.eval(block, **eval_kwargs)
+
+        # 计算完成后上报进度
+        if nid:
+            report_progress(nid)
+
+        return masks.astype(np.uint16)
+
+    except Exception as e:
+        logger.error(f"Worker 计算节点异常: {str(e)}")
+        if nid:
+            report_progress(nid)
+        return np.zeros_like(block, dtype=np.uint16)
 
 
 @register_node("DaskCellpose")
 class DaskCellpose:
+    """
+    Cellpose 分割节点：支持大尺度数据的分布式 2D/3D 分割。
+    """
     CATEGORY = "BrainFlow/Segmentation"
-    DISPLAY_NAME = "Cellpose Segmentation "
+    DISPLAY_NAME = "Cellpose Segmentation (Universal)"
+    PROGRESS_TYPE = ProgressType.CHUNK_COUNT  # 有真实的 chunk 级进度
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -35,11 +87,8 @@ class DaskCellpose:
                 "model_type": (["cyto", "nuclei", "cyto2", "cyto3"],),
                 "flow_threshold": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0}),
                 "cellprob_threshold": ("FLOAT", {"default": 0.0, "min": -6.0, "max": 6.0}),
-                "gpu_batch_size": ("INT", {"default": 2, "min": 1, "max": 16}),
-            },
-            "optional": {
-                "overlap": ("INT", {"default": 30, "min": 0, "max": 100}),
-                "skip_threshold": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 1.0}),
+                "overlap": ("INT", {"default": 10, "min": 0, "max": 100}),
+                "gpu_batch_size": ("INT", {"default": 4, "min": 1, "max": 64}),
             }
         }
 
@@ -47,80 +96,30 @@ class DaskCellpose:
     RETURN_NAMES = ("mask_dask",)
     FUNCTION = "execute"
 
-    def execute(self, dask_arr, diameter, model_type, flow_threshold, cellprob_threshold, gpu_batch_size, overlap=30,
-                skip_threshold=0.02):
-        if not HAS_CELLPOSE:
-            raise ImportError("Cellpose not installed.")
+    def execute(self, dask_arr, diameter, model_type, flow_threshold, cellprob_threshold, overlap, **kwargs):
+        current_node_id = kwargs.get('_node_id')
 
-        print(f" [Cellpose] 配置: Dia={diameter}, Model={model_type}, Overlap={overlap}")
+        # 调试：打印输入数据形状
+        logger.info(f"[Cellpose] Input shape: {dask_arr.shape}, chunks: {dask_arr.chunks}, overlap: {overlap}")
 
-        # =========================================================
-        # 1. 主进程预加载 (防止文件锁冲突)
-        # =========================================================
-        try:
-            print(" [Main] 正在校验模型文件...")
-            # 即使有警告 model_type unused，这样初始化依然能触发下载逻辑
-            models.CellposeModel(gpu=False, model_type=model_type)
-            print(" [Main] 模型校验完毕。")
-        except Exception as e:
-            print(f" [Main Warning] 模型预加载异常 (可忽略): {e}")
-
-        # --- Worker 核心函数 ---
-        def segment_chunk(block, **kwargs):
-            # 2. 空块跳过优化
-            # 假设数据是 uint8/uint16，如果最大值很小说明是背景
-            if block.max() < 10:
-                return np.zeros_like(block, dtype=np.uint16)
-
-            try:
-                use_gpu = torch.cuda.is_available()
-                device = torch.device('cuda') if use_gpu else torch.device('cpu')
-
-                # 加载模型
-                model = models.CellposeModel(
-                    gpu=use_gpu,
-                    model_type=kwargs.get('model_type', 'cyto'),
-                    device=device
-                )
-
-                # 3. 执行推理 (关键修复位)
-                # Cellpose v3/v4 对 3D 数据的要求变严了
-                masks, flows, styles = model.eval(
-                    block,
-                    diameter=kwargs.get('diameter', 15),
-                    channels=None,  # 新版通常不需要手动指定 [0,0]
-                    do_3D=True,
-                    z_axis=0,  # <---  关键修复：显式指定 Z 轴
-                    flow_threshold=kwargs.get('flow_threshold', 0.4),
-                    cellprob_threshold=kwargs.get('cellprob_threshold', 0.0),
-                    batch_size=kwargs.get('gpu_batch_size', 2)
-                )
-
-                return masks.astype(np.uint16)
-
-            except Exception as e:
-                # 打印更详细的错误堆栈以便调试
-                import traceback
-                traceback.print_exc()
-                print(f"Cellpose Error in chunk: {e}")
-                return np.zeros_like(block, dtype=np.uint16)
-
-        # --- Dask 调度 ---
-        # 对于 3D 数据 (Z, Y, X)，我们在三个维度都加 Padding
-        depth = {0: overlap, 1: overlap, 2: overlap}
-        if dask_arr.ndim == 2:
+        # 处理重叠区域深度
+        if dask_arr.ndim == 3:
+            depth = {0: overlap, 1: overlap, 2: overlap}
+        else:
             depth = {0: overlap, 1: overlap}
 
+        # 映射 Dask 重叠块计算
         result = dask_arr.map_overlap(
-            segment_chunk,
+            _segment_chunk,  # 使用模块级别的函数
             depth=depth,
             boundary='reflect',
             dtype=np.uint16,
-            model_type=model_type,
-            diameter=diameter,
-            flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold,
-            gpu_batch_size=gpu_batch_size
+            nid=current_node_id,
+            m_type=model_type,
+            diam=diameter,
+            f_thresh=flow_threshold,
+            c_thresh=cellprob_threshold,
+            b_size=kwargs.get('gpu_batch_size', 4)
         )
 
         return (result,)
