@@ -23,9 +23,7 @@ from core.state_manager import state_manager
 from api.http_routes import router as http_router
 from api.websocket import router as ws_router
 
-# 配置全局日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("BrainFlow.Main")
+from core.logger import logger
 
 
 # ==========================================
@@ -56,15 +54,30 @@ async def lifespan(app: FastAPI):
     state_manager.add_log(">>> Backend Starting...", "info")
 
     # =========================================================
-    # [关键修复] 第一步：先加载插件代码 (Import torch/cellpose)
+    # [关键步骤] 第一步：先加载插件代码 (Import torch/cellpose)
     # 确保主进程在 Dask Worker 启动前完成库的加载，避免 GPU 锁死
     # =========================================================
     try:
-        load_all_plugins()
-        state_manager.add_log("✅ Plugins Loaded Successfully.", "success")
+        success, loaded, failed = load_all_plugins()
+        if success:
+            state_manager.add_log("✅ Plugins Loaded Successfully.", "success")
+        else:
+            # 非关键插件失败：允许降级启动，但明确记录
+            state_manager.add_log(f"⚠️ Plugins loaded with failures: {failed}", "warning")
+            logger.warning(f"[Startup] Some non-critical plugins failed to load: {failed}")
+    except RuntimeError as e:
+        # 关键插件失败：必须中止启动，不允许半残模式
+        # RuntimeError 由 plugin_loader 在检测到关键插件失败时抛出
+        error_msg = str(e)
+        logger.critical(f"[Startup] CRITICAL: {error_msg}")
+        state_manager.add_log(f"❌ STARTUP FAILED: {error_msg}", "error")
+        # 重新抛出，让 uvicorn/FastAPI 知道启动失败
+        raise
     except Exception as e:
-        logger.error(f"Plugin load failed: {e}")
-        state_manager.add_log(f"❌ Plugin load failed: {e}", "error")
+        # 其他未知异常：记录后重新抛出，保守处理
+        logger.critical(f"[Startup] Unexpected error during plugin loading: {type(e).__name__}: {e}")
+        state_manager.add_log(f"❌ STARTUP FAILED: {type(e).__name__}: {e}", "error")
+        raise
 
     # =========================================================
     # [关键修复] 第二步：再启动 Dask 集群

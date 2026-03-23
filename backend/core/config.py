@@ -4,8 +4,6 @@ import multiprocessing
 import logging
 import torch
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("BrainFlow.Config")
 
 
@@ -19,6 +17,9 @@ class AppConfig:
     N_WORKERS = 1
     CHUNK_MULTIPLE = 1
     DASHBOARD_ADDRESS = ":8787"
+    # Dashboard 外部访问地址（用于远程部署/反向代理）
+    # 可通过 BRAINFLOW_DASHBOARD_HOST 环境变量覆盖
+    DASHBOARD_HOST = None  # None 表示使用原始 dashboard_link
 
     def __new__(cls):
         if cls._instance is None:
@@ -30,9 +31,10 @@ class AppConfig:
         hostname = socket.gethostname().lower()
         cpu_count = multiprocessing.cpu_count()
 
-        # === 显存检测逻辑 (核心修复) ===
-        gpu_vram_gb = 0
+        # === 显存与显卡数量检测逻辑 ===
         has_gpu = torch.cuda.is_available()
+        gpu_count = torch.cuda.device_count() if has_gpu else 0
+        gpu_vram_gb = 0
 
         if has_gpu:
             try:
@@ -43,55 +45,34 @@ class AppConfig:
                 logger.debug(f"Failed to get GPU memory info: {e}")
                 gpu_vram_gb = 0
 
-        logger.info(f"  硬件自检: GPU={has_gpu} (VRAM: {gpu_vram_gb:.1f} GB), CPU={cpu_count}")
+        logger.info(f"  硬件自检: GPU={has_gpu} (数量: {gpu_count}, 单卡VRAM: {gpu_vram_gb:.1f} GB), CPU={cpu_count}")
 
         # =========================================================
-        # 策略 1: 生产服务器 (大显存/高延迟)
+        # 策略 1: 多 GPU 分布式模式 (如 8x RTX 3090)
         # =========================================================
-        if "server" in hostname or "202.38" in hostname:
-            logger.info("   -> 识别模式: [生产服务器]")
-            self.CHUNK_MULTIPLE = 4  # 必须加大块，防止 IO 卡死
-
-            # 如果是服务器级别的卡 (A100/3090, VRAM > 20GB)，可以开 4 个
-            if gpu_vram_gb > 20:
-                self.N_WORKERS = 4
-            # 普通服务器卡 (10-20GB)，保守开 2-3 个
-            elif gpu_vram_gb > 10:
-                self.N_WORKERS = 2
-            else:
-                self.N_WORKERS = 1
+        if gpu_count > 1:
+            logger.info(f"   -> 识别模式: [多卡高并发模式]")
+            self.N_WORKERS = gpu_count  # 有几张卡就开几个 Worker
+            # 显存大于 20GB (如 3090) 则拉高 Chunk，否则保守
+            self.CHUNK_MULTIPLE = 4 if gpu_vram_gb > 20 else 2
 
         # =========================================================
-        # 策略 2: 本地开发机 (RTX 3050 等消费级显卡)
+        # 策略 2: 单 GPU 苟活模式 (如 本地 RTX 3050)
         # =========================================================
-        elif "song" in hostname or "desktop" in hostname or has_gpu:
-            logger.info("   -> 识别模式: [本地/消费级显卡]")
-            self.CHUNK_MULTIPLE = 1  # 本地硬盘快，小块更灵活
-
-            # --- 关键修复：根据显存决定 Worker 数量 ---
-            if gpu_vram_gb < 6:
-                # 3050 Laptop (4GB) -> 只能开 1 个！绝对不能多！
-                logger.warning(f"   显存较小 ({gpu_vram_gb:.1f}GB)，强制单 Worker 以防 OOM")
-                self.N_WORKERS = 1
-            elif gpu_vram_gb < 10:
-                # 3050/3060/3070 (8GB) -> 建议 1 个，最多 2 个
-                # Cellpose 加载一次模型约 1-2GB，加上数据处理，2个都很勉强
-                # 为了稳，默认 1 个，利用率低点总比崩了好
-                self.N_WORKERS = 1
-            elif gpu_vram_gb < 20:
-                # 3080/4080 (12GB-16GB) -> 可以开 2-3 个
-                self.N_WORKERS = 2
-            else:
-                # 3090/4090 (24GB) -> 可以开 4 个
-                self.N_WORKERS = 4
-
-            # 如果是纯 CPU 模式（没显卡），则拉满 CPU
-            if not has_gpu:
-                self.N_WORKERS = max(1, cpu_count - 2)
+        elif gpu_count == 1:
+            logger.info("   -> 识别模式: [单卡保护模式]")
+            self.N_WORKERS = 1
+            self.CHUNK_MULTIPLE = 1
 
         # =========================================================
-        # 策略 3: 环境变量强制覆盖 (给你留个后门)
+        # 策略 3: 纯 CPU 模式
         # =========================================================
+        else:
+            logger.info("   -> 识别模式: [纯 CPU 模式]")
+            self.N_WORKERS = max(1, cpu_count - 2)
+            self.CHUNK_MULTIPLE = 1
+
+        # ==== 环境变量强制覆盖逻辑保持不变 ====
         if os.getenv("BRAINFLOW_WORKERS"):
             self.N_WORKERS = int(os.getenv("BRAINFLOW_WORKERS"))
             logger.warning(f"   -> [Override] 环境变量强制 Workers={self.N_WORKERS}")
@@ -99,6 +80,9 @@ class AppConfig:
         if os.getenv("BRAINFLOW_CHUNK"):
             self.CHUNK_MULTIPLE = int(os.getenv("BRAINFLOW_CHUNK"))
             logger.warning(f"   -> [Override] 环境变量强制 ChunkMult={self.CHUNK_MULTIPLE}")
+
+        if os.getenv("BRAINFLOW_DASHBOARD_HOST"):
+            self.DASHBOARD_HOST = os.getenv("BRAINFLOW_DASHBOARD_HOST")
 
         logger.info(f" 最终生效配置: Workers={self.N_WORKERS}, Chunk={self.CHUNK_MULTIPLE}")
 

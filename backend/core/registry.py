@@ -26,6 +26,12 @@ def register_node(name: str):
     """
 
     def decorator(cls):
+        if name in NODE_CLASS_MAPPINGS:
+            existing = NODE_CLASS_MAPPINGS[name]
+            logger.warning(
+                f"[Registry] Duplicate node name '{name}': "
+                f"{existing.__name__} will be overridden by {cls.__name__}"
+            )
         NODE_CLASS_MAPPINGS[name] = cls
         cls.NODE_TYPE_NAME = name
         if hasattr(cls, "DISPLAY_NAME"):
@@ -65,7 +71,7 @@ def get_node_info():
         # 3. 获取其他元数据
         category = getattr(cls, "CATEGORY", "User/Custom")
         display_name = getattr(cls, "DISPLAY_NAME", name)
-        description = cls.__doc__.strip() if cls.__doc__ else "No description."
+        description = getattr(cls, "DESCRIPTION", None) or (cls.__doc__.strip() if cls.__doc__ else "No description.")
 
         # 4. 获取进度类型（兼容字符串和枚举）
         progress_type_attr = getattr(cls, "PROGRESS_TYPE", None)

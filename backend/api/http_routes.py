@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from core.registry import get_node_info
 from core.auth import verify_api_key
 from services.dask_service import dask_service
+import os
 
 router = APIRouter()
 
@@ -12,24 +13,27 @@ async def get_node_definitions():
 @router.get("/dashboard_url", dependencies=[Depends(verify_api_key)])
 async def get_dashboard_url():
     """
-    获取 Dask Dashboard 的实际 URL
-    始终返回 localhost:8787，因为前端需要从浏览器访问本地运行的服务
+    获取 Dask Dashboard 的 URL。
+
+    优先级：
+    1. 环境变量 BRAINFLOW_DASHBOARD_HOST（用于远程部署/反向代理场景）
+    2. 原始 dashboard_link（适合本地开发）
     """
     client = dask_service.get_client()
     if client and client.dashboard_link:
-        # 提取端口号（如果 Dask 使用了其他端口）
-        # dashboard_link 格式通常是 "http://127.0.0.1:8787/status" 或 "http://192.168.x.x:8787/status"
-        try:
-            # 尝试提取端口号
-            if ":" in client.dashboard_link:
-                # 从 "http://127.0.0.1:8787/status" 提取 "8787"
-                parts = client.dashboard_link.split(":")
-                if len(parts) >= 3:
-                    port = parts[2].split("/")[0]
-                    # 始终返回 localhost
-                    return {"dashboard_url": f"http://localhost:{port}"}
-        except Exception:
-            pass
-        # 默认返回 localhost:8787
-        return {"dashboard_url": "http://localhost:8787"}
-    return {"dashboard_url": "http://localhost:8787"}
+        # 检查是否配置了自定义 host
+        custom_host = os.getenv("BRAINFLOW_DASHBOARD_HOST")
+        if custom_host:
+            # 提取端口号并替换 host
+            try:
+                if ":" in client.dashboard_link:
+                    parts = client.dashboard_link.split(":")
+                    if len(parts) >= 3:
+                        port = parts[2].split("/")[0]
+                        return {"dashboard_url": f"{custom_host}:{port}"}
+            except Exception:
+                pass
+            return {"dashboard_url": custom_host}
+        # 默认返回原始 dashboard_link（适合本地开发）
+        return {"dashboard_url": client.dashboard_link}
+    return {"dashboard_url": None}

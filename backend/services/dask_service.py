@@ -3,12 +3,44 @@ import platform
 import os
 import time
 import dask.config
-import torch
 from dask.distributed import Client, LocalCluster
 
 # 引用统一的 logger
 from core.logger import logger
 from core.config import config
+from distributed import WorkerPlugin
+
+# torch 延迟导入：避免 PyTorch 未安装时整个模块无法加载
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    logger.warning("PyTorch 未安装, GPU features will be disabled")
+
+# ==========================================
+# 新增：Windows 专属的多 GPU 绑定插件
+# ==========================================
+class WindowsMultiGPUPlugin(WorkerPlugin):
+    def setup(self, worker):
+        """当 Dask Worker 进程启动时执行"""
+        try:
+            import torch
+            gpu_count = torch.cuda.device_count()
+            if gpu_count > 0:
+                # LocalCluster 默认会将 worker 命名为 0, 1, 2, 3...
+                worker_idx = int(worker.name)
+                # 轮询分配：将 worker ID 映射到具体的显卡 ID
+                assigned_gpu = worker_idx % gpu_count
+                # 给这个 worker 对象打上一个标签
+                worker.assigned_gpu = f"cuda:{assigned_gpu}"
+                logger.info(f"Worker {worker.name} successfully bound to {worker.assigned_gpu}")
+            else:
+                worker.assigned_gpu = "cpu"
+        except Exception as e:
+            # 防御性回退
+            worker.assigned_gpu = "cuda:0"
+            logger.debug(f"Failed to bind GPU for worker: {e}")
 
 
 # ==========================================
@@ -49,32 +81,46 @@ class DaskService:
         if self.client: return self.client
 
         logger.info("Initializing Dask LocalCluster...")
-
-        # 读取配置
         n_workers = config.N_WORKERS
-        self.recommended_chunk_multiple = config.CHUNK_MULTIPLE
-
-        resources = {}
-        env_vars = {}
-
-        if torch.cuda.is_available():
-            logger.info(f" GPU Mode: Enabled")
-            resources = {"GPU": 1}
-            env_vars["CUDA_VISIBLE_DEVICES"] = os.getenv("CUDA_VISIBLE_DEVICES", "0")
 
         try:
-            # 使用 threads 模式（processes=False），以便 workers 可以访问相同的 Python 环境和包
-            # 这样可以确保 Cellpose 等模块在 workers 中可用
-            self.cluster = LocalCluster(
-                n_workers=n_workers,
-                threads_per_worker=1,
-                processes=False,  # 使用 threads 而不是 processes
-                resources=resources,
-                dashboard_address=config.DASHBOARD_ADDRESS,
-                silence_logs=logging.WARNING,
-                memory_limit=0,  # 自动检测内存限制
-            )
-            self.client = Client(self.cluster)
+            if HAS_TORCH and torch.cuda.is_available():
+                gpu_count = torch.cuda.device_count()
+
+                # ==== 核心改动：Windows 8卡专属多进程模式 ====
+                if gpu_count > 1 and n_workers > 1:
+                    logger.info(f"启动标准 LocalCluster 多进程模式 (Windows {gpu_count}卡特供版)")
+                    self.cluster = LocalCluster(
+                        n_workers=n_workers,
+                        threads_per_worker=1,
+                        processes=True,  # 强制开启多进程！
+                        dashboard_address=config.DASHBOARD_ADDRESS,
+                        silence_logs=logging.WARNING,
+                    )
+                    self.client = Client(self.cluster)
+
+                    # 注册我们的插件，给这 8 个进程分别分配 cuda:0 到 cuda:7
+                    self.client.register_plugin(WindowsMultiGPUPlugin(), name="windows_gpu_pinning")
+                else:
+                    # 单卡苟活模式（本地笔记本）
+                    logger.info("启动标准 LocalCluster (单卡保护模式)")
+                    self.cluster = LocalCluster(
+                        n_workers=1,
+                        threads_per_worker=1,
+                        processes=False,
+                        dashboard_address=config.DASHBOARD_ADDRESS,
+                        silence_logs=logging.WARNING,
+                    )
+                    self.client = Client(self.cluster)
+            else:
+                # 纯 CPU 模式
+                self.cluster = LocalCluster(
+                    n_workers=n_workers,
+                    threads_per_worker=1,
+                    dashboard_address=config.DASHBOARD_ADDRESS,
+                    silence_logs=logging.WARNING,
+                )
+                self.client = Client(self.cluster)
 
             # 预先导入 cellpose 到 workers 中
             def import_cellpose_on_workers():
@@ -127,24 +173,6 @@ class DaskService:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception as e:
             logger.debug(f"Memory trim failed: {e}")
-
-    def bind_layers_to_node(self, layer_names, node_id):
-        pass
-
-    def monitor_task(self, future, callback=None, global_progress_callback=None):
-        if not self.get_client(): return
-
-        logger.info(f"Waiting for Dask task: {future.key}")
-
-        while not future.done():
-            if callback:
-                callback(0, 100, "Cluster Processing (Writer)...")
-            time.sleep(0.5)
-
-        if future.status == 'error':
-            future.result()
-
-        return future.result()
 
 
 dask_service = DaskService()

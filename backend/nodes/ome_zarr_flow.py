@@ -7,7 +7,6 @@ import zarr
 import dask.array as da
 from core.registry import register_node, ProgressType
 from services.dask_service import dask_service
-from services.chunk_optimizer import ChunkOptimizer, optimize_dask_array
 from core.config import config
 from utils.progress_helper import report_progress
 from core.chunk_policy import ChunkPolicy, reader_init_chunks, writer_minimal_rechunk, RechunkReason
@@ -88,42 +87,56 @@ class OMEZarrReader:
             if len(file_path) > 4096:
                 raise ValueError(f"[Node {node_id}] File path too long")
 
-        # 2. 标准化路径
+        # 2. 标准化路径（先 resolve symlink）
         try:
-            file_path = os.path.realpath(file_path)
+            resolved_path = os.path.realpath(file_path)
         except (OSError, ValueError) as e:
-            raise ValueError(f"[Node {node_id}] Invalid path: {e}")
+            raise ValueError(f"[Node {node_id}] Invalid path")
 
-        # 3. 路径遍历保护 - 放宽限制以支持更多使用场景
-        # 允许的目录基础路径
-        allowed_bases = [
-            os.getcwd(),
-            os.path.expanduser("~/data"),
-            os.path.expanduser("~"),  # 允许用户主目录
-            os.path.dirname(file_path),  # 允许文件所在目录
-        ]
-        is_allowed = False
-        for base in allowed_bases:
-            try:
-                base_real = os.path.realpath(base)
-                if os.path.commonpath([file_path, base_real]) == base_real:
-                    is_allowed = True
-                    break
-            except (ValueError, OSError):
-                continue
+        # 3. 路径白名单校验
+        def _get_allowed_data_dirs():
+            """获取允许的数据目录白名单（优先环境变量，其次默认值）"""
+            env_dirs = os.getenv("BRAINFLOW_DATA_DIRS", "")
+            if env_dirs:
+                # 环境变量：冒号分隔（Windows 用分号）
+                sep = ";" if os.name == "nt" else ":"
+                dirs = [d.strip() for d in env_dirs.split(sep) if d.strip()]
+                if dirs:
+                    return dirs
+            # 默认白名单：常见数据目录
+            # 注意：生产环境应通过环境变量配置，不要在这里添加敏感路径
+            default_dirs = ["./data", os.path.expanduser("~/data")]
+            # Windows: 添加 E:\Users 作为默认允许（仅开发环境）
+            if os.name == "nt" and os.path.exists("E:\\Users"):
+                default_dirs.append("E:\\Users")
+            return default_dirs
 
-        # 如果不在允许列表中，检查是否是绝对路径（作为额外的安全检查）
-        if not is_allowed and os.path.isabs(file_path):
-            # 对于绝对路径，只做基本的路径遍历检查
-            if ".." in file_path.split(os.sep):
-                # 检查是否试图向上遍历
-                resolved = os.path.realpath(file_path)
-                # 确保解析后的路径没有可疑的父目录引用
-                if "/../" not in resolved.replace("\\", "/"):
-                    is_allowed = True
+        def _is_path_allowed(path: str, allowed_dirs: list) -> bool:
+            """检查路径是否在允许的目录内（严格父子关系判断）"""
+            for base in allowed_dirs:
+                try:
+                    # 白名单目录也要 resolve（处理 symlink）
+                    base_real = os.path.realpath(base)
+                    # 使用 commonpath 判断严格的父子关系
+                    # commonpath 要求 path 必须是 base 的子路径
+                    common = os.path.commonpath([path, base_real])
+                    if common == base_real:
+                        return True
+                except (ValueError, OSError):
+                    # 不同驱动器或路径不存在，跳过
+                    continue
+            return False
 
-        if not is_allowed:
-            raise PermissionError(f"[Node {node_id}] Path must be within allowed directories. Current path: {file_path}")
+        allowed_dirs = _get_allowed_data_dirs()
+        if not _is_path_allowed(resolved_path, allowed_dirs):
+            # 不泄露具体白名单路径，只提示需要配置
+            raise PermissionError(
+                f"[Node {node_id}] Access denied: path outside allowed data directories. "
+                f"Set BRAINFLOW_DATA_DIRS environment variable to configure allowed paths."
+            )
+
+        # 校验通过，使用规范化后的路径
+        file_path = resolved_path
 
         # 4. 存在性和类型检查
         if not os.path.exists(file_path):
@@ -147,82 +160,68 @@ class OMEZarrReader:
         logger.info(f"[ZarrReader] Loading: {file_path}")
 
         try:
-            # 1. 打开 Group (只读模式)
-            store = zarr.open_group(file_path, mode='r')
-
-            # 2. 解析 OME-NGFF Multiscales 元数据
-            multiscales = store.attrs.get("multiscales", [])
-            dataset_path = "0"
-
-            if multiscales:
-                datasets = multiscales[0].get("datasets", [])
-                if datasets:
-                    dataset_path = datasets[0]["path"]
-
-            # 3. 加载 Array
-            # 首先尝试从 multiscales 获取正确的数据集路径
-            dataset_path = "0"  # 默认路径
-            if multiscales:
-                datasets = multiscales[0].get("datasets", [])
-                if datasets:
-                    dataset_path = datasets[0]["path"]
-
-            # 尝试从 store 获取数组
             z_arr = None
-            if dataset_path in store:
-                try:
-                    z_arr = store[dataset_path]
-                    logger.info(f"[ZarrReader] Loaded array from dataset path: {dataset_path}")
-                except Exception as e:
-                    logger.debug(f"Failed to load from dataset path '{dataset_path}': {e}")
+            multiscales = []
 
-            # 如果失败，尝试直接打开 zarr 文件
+            # =========================================================
+            # 策略 1：先尝试直接打开 array（处理 s0 这种直接是 array 的情况）
+            # =========================================================
+            try:
+                z_arr = zarr.open_array(file_path, mode='r')
+                logger.info(f"[ZarrReader] Loaded array directly from path")
+            except Exception as e:
+                logger.debug(f"[ZarrReader] Not a direct array: {e}")
+
+            # =========================================================
+            # 策略 2：如果失败，尝试打开 group（标准 OME-Zarr 格式）
+            # =========================================================
             if z_arr is None:
                 try:
-                    z_arr = zarr.open_array(file_path, mode='r')
-                    logger.info(f"[ZarrReader] Loaded array directly from file path")
+                    store = zarr.open_group(file_path, mode='r')
+                    logger.info(f"[ZarrReader] Opened as group")
+
+                    # 解析 OME-NGFF Multiscales 元数据
+                    multiscales = store.attrs.get("multiscales", [])
+                    dataset_path = "0"  # 默认路径
+                    if multiscales:
+                        datasets = multiscales[0].get("datasets", [])
+                        if datasets:
+                            dataset_path = datasets[0]["path"]
+
+                    # 从 dataset_path 加载
+                    if dataset_path in store:
+                        try:
+                            z_arr = store[dataset_path]
+                            logger.info(f"[ZarrReader] Loaded array from dataset path: {dataset_path}")
+                        except Exception as e:
+                            logger.debug(f"Failed to load from dataset path '{dataset_path}': {e}")
+
+                    # 如果失败，尝试遍历 keys
+                    if z_arr is None:
+                        keys = list(store.keys())
+                        logger.info(f"[ZarrReader] Available keys in group: {keys}")
+                        for key in keys:
+                            try:
+                                candidate = store[key]
+                                if hasattr(candidate, 'shape'):
+                                    z_arr = candidate
+                                    logger.info(f"[ZarrReader] Loaded array from group key: {key}")
+                                    break
+                            except Exception as e:
+                                logger.debug(f"Failed to load from key '{key}': {e}")
+                                continue
+
                 except Exception as e:
-                    logger.debug(f"Direct zarr array open failed: {e}, trying group keys")
+                    logger.debug(f"[ZarrReader] Failed to open as group: {e}")
 
-            # 如果还是失败，尝试从 group keys 获取
+            # =========================================================
+            # 验证结果
+            # =========================================================
             if z_arr is None:
-                keys = list(store.keys())
-                logger.info(f"[ZarrReader] Available keys in group: {keys}")
+                raise ValueError(f"No valid zarr array found at: {file_path}")
 
-                if keys:
-                    for key in keys:
-                        try:
-                            z_arr = store[key]
-                            logger.info(f"[ZarrReader] Loaded array from group key: {key}")
-                            break
-                        except Exception as e:
-                            logger.debug(f"Failed to load from key '{key}': {e}")
-                            continue
-
-            # 验证是否成功获取到数组
-            if z_arr is None:
-                raise ValueError(f"No valid array found in Zarr file. Available keys: {list(store.keys()) if hasattr(store, 'keys') else 'N/A'}")
-
-            # 确保我们得到的是一个 Array，不是 Group
-            if hasattr(z_arr, 'store') and hasattr(z_arr, 'shape'):
-                # 这是一个有效的 Array
-                pass
-            elif hasattr(z_arr, 'group_keys'):
-                # 这是一个 Group，需要获取第一个 array
-                keys = list(z_arr.keys())
-                logger.warning(f"[ZarrReader] Got a Group instead of Array, keys: {keys}")
-                if keys:
-                    for key in keys:
-                        try:
-                            z_arr = z_arr[key]
-                            logger.info(f"[ZarrReader] Loaded array from group key: {key}")
-                            if hasattr(z_arr, 'shape'):
-                                break
-                        except Exception as e:
-                            logger.debug(f"Failed to load from key '{key}': {e}")
-                            continue
-                    if not hasattr(z_arr, 'shape'):
-                        raise ValueError(f"No valid array found in Group. Keys: {keys}")
+            if not hasattr(z_arr, 'shape'):
+                raise ValueError(f"Loaded object is not a valid array")
 
             # 4. 构建 Dask Array (懒加载)
             dask_arr = da.from_zarr(z_arr)
@@ -362,203 +361,94 @@ class OMEZarrReader:
             parts.append(f"{name}={size}")
         return "(" + ", ".join(parts) + ")"
 
-    @staticmethod
-    def _apply_default_3d_config(dask_arr, array_shape, chunk_z, chunk_y, chunk_x, keep_first_dim, node_id):
-        """应用默认3D chunk 配置：使用指定的z/y/x分块大小"""
-        ndim = dask_arr.ndim
-        new_chunks = []
-
-        for i, dim_size in enumerate(array_shape):
-            if i == 0 and keep_first_dim and ndim > 3:
-                # 第一维度保持完整（通道/时间）
-                new_chunks.append(dim_size)
-            else:
-                # 对于3D数据 (Z, Y, X) 或 (C, Z, Y, X)
-                # 映射到chunk_z, chunk_y, chunk_x
-                if ndim == 3:
-                    # (Z, Y, X)
-                    if i == 0:
-                        new_chunks.append(min(chunk_z, dim_size))
-                    elif i == 1:
-                        new_chunks.append(min(chunk_y, dim_size))
-                    else:
-                        new_chunks.append(min(chunk_x, dim_size))
-                elif ndim == 4:
-                    # (C, Z, Y, X)
-                    if i == 1:
-                        new_chunks.append(min(chunk_z, dim_size))
-                    elif i == 2:
-                        new_chunks.append(min(chunk_y, dim_size))
-                    elif i == 3:
-                        new_chunks.append(min(chunk_x, dim_size))
-                    else:
-                        new_chunks.append(dim_size)
-                elif ndim == 5:
-                    # (T, C, Z, Y, X)
-                    if i == 2:
-                        new_chunks.append(min(chunk_z, dim_size))
-                    elif i == 3:
-                        new_chunks.append(min(chunk_y, dim_size))
-                    elif i == 4:
-                        new_chunks.append(min(chunk_x, dim_size))
-                    else:
-                        new_chunks.append(dim_size)
-                elif ndim == 2:
-                    # (Y, X)
-                    if i == 0:
-                        new_chunks.append(min(chunk_y, dim_size))
-                    else:
-                        new_chunks.append(min(chunk_x, dim_size))
-                else:
-                    # 其他情况使用默认值
-                    new_chunks.append(min(64, dim_size))
-
-        dask_arr = dask_arr.rechunk(tuple(new_chunks))
-        logger.info(f"[ZarrReader] Default 3D chunk: {dask_arr.chunksize}")
-        return dask_arr
-
-    @staticmethod
-    def _apply_manual_chunk_config(dask_arr, array_shape, chunk_config, chunk_size, keep_first_dim, node_id):
-        """应用手动 chunk 配置"""
-        ndim = dask_arr.ndim
-
-        # 方式 1: 解析字符串配置 (如 "10,512,512" 或 "auto,512,512")
-        if chunk_config and chunk_config.strip():
-            try:
-                parts = [p.strip().lower() for p in chunk_config.split(",")]
-
-                # 检查是否是 "auto" 关键字
-                has_auto = any(p == "auto" or p == "-1" for p in parts)
-
-                if has_auto:
-                    # 混合模式：部分自动，部分手动
-                    new_chunks = []
-                    for i, part in enumerate(parts):
-                        if part == "auto" or part == "-1":
-                            # 该维度自动计算（使用启发式规则）
-                            dim_size = array_shape[i]
-                            if i == 0 and keep_first_dim:
-                                # 第一维度保持完整
-                                new_chunks.append(dim_size)
-                            elif i >= ndim - 2:
-                                # 最后两个维度（通常是 Y, X）使用 chunk_size
-                                new_chunks.append(min(chunk_size, dim_size))
-                            else:
-                                # 其他维度也使用 chunk_size
-                                new_chunks.append(min(chunk_size, dim_size))
-                        else:
-                            # 手动指定
-                            new_chunks.append(int(part))
-
-                    # 填充剩余维度
-                    while len(new_chunks) < ndim:
-                        new_chunks.append(chunk_size)
-
-                    dask_arr = dask_arr.rechunk(tuple(new_chunks[:ndim]))
-                    logger.info(f"[ZarrReader] Manual chunk (mixed): {dask_arr.chunksize}")
-
-                else:
-                    # 纯手动配置
-                    manual_chunks = [int(p) for p in parts]
-
-                    # 填充或截断到正确维度
-                    if len(manual_chunks) < ndim:
-                        manual_chunks.extend([chunk_size] * (ndim - len(manual_chunks)))
-                    elif len(manual_chunks) > ndim:
-                        manual_chunks = manual_chunks[:ndim]
-
-                    # 确保 chunk 不超过数组大小
-                    final_chunks = [min(mc, arr_size) for mc, arr_size in zip(manual_chunks, array_shape)]
-
-                    dask_arr = dask_arr.rechunk(tuple(final_chunks))
-                    logger.info(f"[ZarrReader] Manual chunk: {dask_arr.chunksize}")
-
-            except (ValueError, IndexError) as e:
-                logger.warning(f"[ZarrReader] Failed to parse chunk_config '{chunk_config}': {e}")
-                logger.info(f"[ZarrReader] Falling back to chunk_size mode")
-                # 降级到方式 2
-
-        else:
-            # 方式 2: 使用单一 chunk_size 值
-            new_chunks = []
-
-            for i, dim_size in enumerate(array_shape):
-                if i == 0 and keep_first_dim:
-                    # 第一维度保持完整（通道/时间）
-                    new_chunks.append(dim_size)
-                elif i >= ndim - 2:
-                    # 最后两个维度（空间维度 Y, X）使用指定值
-                    new_chunks.append(min(chunk_size, dim_size))
-                else:
-                    # 中间维度也使用指定值
-                    new_chunks.append(min(chunk_size, dim_size))
-
-            dask_arr = dask_arr.rechunk(tuple(new_chunks))
-            logger.info(f"[ZarrReader] Manual chunk (size-based): {dask_arr.chunksize}")
-
-        return dask_arr
-
-    @staticmethod
-    def _apply_auto_chunk_config(dask_arr, target_chunk_mb, node_id):
-        """应用智能 chunk 配置"""
-        gpu_memory_gb = 0
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_memory_gb = torch.cuda.mem_get_info()[0] / 1024**3
-        except Exception as e:
-            logger.debug(f"Failed to detect GPU memory: {e}")
-
-        # 使用指定的目标 chunk 大小
-        original_ideal = ChunkOptimizer.IDEAL_CHUNK_SIZE
-        ChunkOptimizer.IDEAL_CHUNK_SIZE = int(target_chunk_mb * 1024 * 1024)
-
-        try:
-            original_chunks = dask_arr.chunksize
-            dask_arr = optimize_dask_array(dask_arr, gpu_memory_gb=gpu_memory_gb)
-            new_chunks = dask_arr.chunksize
-
-            if original_chunks != new_chunks:
-                logger.info(f"[ZarrReader] Auto chunk: {original_chunks} -> {new_chunks}")
-
-                # Log optimization details
-                opt_config = ChunkOptimizer.auto_configure(
-                    dask_arr.shape, dask_arr.dtype, gpu_memory_gb
-                )
-                logger.info(f"[ZarrReader] Estimated time: "
-                          f"{opt_config['time_estimate']['estimated_seconds']:.1f}s, "
-                          f"{opt_config['time_estimate']['n_chunks']} chunks")
-
-        finally:
-            ChunkOptimizer.IDEAL_CHUNK_SIZE = original_ideal
-
-        return dask_arr
-
 
 # =============================================================================
 #  工具函数：模块级别的进度报告钩子
 # =============================================================================
-def _write_progress_hook(block, node_id=None):
+def _write_progress_hook(block, node_id=None, execution_id=None):
     """
     Writer 节点的进度报告钩子。
     在每个 chunk 写出完成后触发进度更新。
     注意：这个函数必须在模块级别，以便 Dask 可以序列化。
     """
     if node_id:
-        report_progress(node_id)
+        report_progress(node_id, execution_id=execution_id)
     return block
 
 
 # =============================================================================
 #  节点：OME-Zarr 写入器 (Writer)
 # =============================================================================
+def _normalize_axes_for_ngff(axes, ndim):
+    if not axes:
+        if ndim == 2:
+            return [{"name": "y"}, {"name": "x"}]
+        if ndim == 3:
+            return [{"name": "z"}, {"name": "y"}, {"name": "x"}]
+        if ndim == 4:
+            return [{"name": "c"}, {"name": "z"}, {"name": "y"}, {"name": "x"}]
+        return [{"name": f"dim_{i}"} for i in range(ndim)]
+
+    normalized = []
+    for ax in axes:
+        if isinstance(ax, dict):
+            normalized.append(ax)
+        else:
+            normalized.append({"name": str(ax).lower()})
+    return normalized
+
+
+def _write_ome_metadata(write_result, abs_path, ndim, metadata):
+    """
+    写入 OME-NGFF 元数据到 root group。
+    显式依赖 write_result，确保数据写完后才写 metadata。
+    """
+    try:
+        z = zarr.open(abs_path, mode='r+')
+
+        axes = _normalize_axes_for_ngff(None, ndim)
+        voxel_size = [1.0] * ndim
+        if metadata:
+            if metadata.get("axes"):
+                axes = _normalize_axes_for_ngff(metadata["axes"], ndim)
+            if metadata.get("voxel_size") and len(metadata["voxel_size"]) == ndim:
+                voxel_size = metadata["voxel_size"]
+
+        datasets_meta = [{
+            "path": "0",
+            "coordinateTransformations": [{"type": "scale", "scale": voxel_size}]
+        }]
+        z.attrs["multiscales"] = [{
+            "version": "0.4",
+            "name": "processed",
+            "datasets": datasets_meta,
+            "axes": axes,
+            "type": "gaussian"
+        }]
+        logger.info(f"[ZarrWriter] OME-NGFF metadata written. Axes: {[a['name'] for a in axes]}, Scale: {voxel_size}")
+    except Exception as e:
+        logger.warning(f"[ZarrWriter] Failed to write OME metadata: {e}")
+    return write_result
+
+
+def _finalize_write_result(write_result, meta_result, abs_path):
+    """
+    最终汇合节点：串联 data write 和 meta write。
+    meta_result 参数虽然函数体中未直接使用，但它的存在让 Dask
+    建立了对 _write_ome_metadata delayed 的隐式依赖，
+    确保 metadata 写完后才返回最终结果。
+    """
+    logger.info(f"[ZarrWriter] Write complete: {abs_path}")
+    return abs_path
+
+
 @register_node("OMEZarrWriter")
 class OMEZarrWriter:
     CATEGORY = "BrainFlow/IO"
     DISPLAY_NAME = "💾 OME-Zarr Writer (Save)"
-    DESCRIPTION = "触发整个计算流，将结果保存为 OME-Zarr 格式。"
+    DESCRIPTION = "构建写盘的 lazy 计划，由 executor 统一触发计算。"
     OUTPUT_NODE = True
-    PROGRESS_TYPE = ProgressType.STATE_ONLY  # 状态型进度（无真实 chunk 回报）
+    PROGRESS_TYPE = ProgressType.CHUNK_COUNT  # 通过 map_blocks 钩子上报 chunk 进度
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -573,22 +463,24 @@ class OMEZarrWriter:
             }
         }
 
-    RETURN_TYPES = ()
+    # 返回 DELAYED 类型，executor 识别后统一提交
+    RETURN_TYPES = ("DELAYED",)
+    RETURN_NAMES = ("write_task",)
     FUNCTION = "save_zarr"
 
-    async def save_zarr(self, dask_arr, output_path, compressor_name="default", metadata=None,
-                        callback=None, global_progress_callback=None, **kwargs):
-        import asyncio
-
+    def save_zarr(self, dask_arr, output_path, compressor_name="default", metadata=None, **kwargs):
+        import dask
         node_id = kwargs.get('_node_id', 'unknown_writer')
+        execution_id = kwargs.get('_execution_id')
 
         # 路径处理
-        if not output_path: output_path = "output.zarr"
-        if not output_path.lower().endswith(".zarr"): output_path += ".zarr"
+        if not output_path:
+            output_path = "output.zarr"
+        if not output_path.lower().endswith(".zarr"):
+            output_path += ".zarr"
         abs_path = os.path.abspath(output_path)
 
         # 压缩器配置
-        compressor = None
         if compressor_name == "zstd":
             compressor = numcodecs.Zstd(level=3)
         elif compressor_name == "blosc":
@@ -600,93 +492,39 @@ class OMEZarrWriter:
         else:
             compressor = numcodecs.Zstd(level=3)
 
-        logger.info(f"[ZarrWriter] Saving to: {abs_path} | Compressor: {compressor_name}")
+        logger.info(f"[ZarrWriter] Building lazy write plan: {abs_path} | Compressor: {compressor_name}")
 
-        def run_save(arr_to_save):
-            # ========== 统一 Chunk 策略 ==========
-            # 使用 ChunkPolicy 进行最小化 rechunk，只在必要时修正
-            policy = ChunkPolicy()
-            policy.working_chunks = arr_to_save.chunksize
+        # ===== Chunk 策略（pure lazy，不触发计算）=====
+        policy = ChunkPolicy()
+        policy.working_chunks = dask_arr.chunksize
+        arr_to_save = writer_minimal_rechunk(dask_arr, policy=policy)
+        policy.output_chunks = arr_to_save.chunksize
+        logger.info(f"[ZarrWriter] Planned chunks: {policy.output_chunks}, partitions: {arr_to_save.npartitions}")
 
-            logger.info(f"[ZarrWriter] Input chunks: {arr_to_save.chunksize}")
-            logger.info(f"[ZarrWriter] Data shape: {arr_to_save.shape}")
-            logger.info(f"[ZarrWriter] Chunks uniform: {policy.is_uniform(arr_to_save)}")
+        # ===== 注入进度钩子（map_blocks 埋点，lazy）=====
+        arr_with_progress = arr_to_save.map_blocks(
+            _write_progress_hook,
+            dtype=arr_to_save.dtype,
+            node_id=node_id,
+            execution_id=execution_id
+        )
 
-            # 只在必要时进行 minimal rechunk
-            arr_to_save = writer_minimal_rechunk(arr_to_save, policy=policy)
+        # ===== 构建 lazy 写盘 graph（compute=False）=====
+        # to_zarr(compute=False) 返回 dask.delayed，不触发任何计算
+        lazy_write = arr_with_progress.to_zarr(
+            abs_path,
+            component="0",
+            compressor=compressor,
+            overwrite=True,
+            compute=False
+        )
 
-            policy.output_chunks = arr_to_save.chunksize
-            logger.info(f"[ZarrWriter] Final chunks: {policy.output_chunks}")
-            logger.info(f"[ZarrWriter] Rechunk history: {policy.rechunk_reasons}")
+        # ===== 串联 OME metadata 写入（显式依赖写盘完成） =====
+        ndim = arr_to_save.ndim
+        lazy_meta = dask.delayed(_write_ome_metadata)(lazy_write, abs_path, ndim, metadata)
 
-            total_chunks = arr_to_save.npartitions
-            logger.info(f"[ZarrWriter] Total chunks to save: {total_chunks}")
+        # 把 data write 和 meta write 串联成一个最终 delayed
+        final_delayed = dask.delayed(_finalize_write_result)(lazy_write, lazy_meta, abs_path)
 
-            if callback: callback(-1, 100, f"Saving {total_chunks} chunks to {abs_path}...")
-
-            # ========== 标准 OME-NGFF 输出结构 ==========
-            # 按 group/dataset 结构写入：
-            # root group
-            #   └── dataset "0"  (数据)
-            # └── multiscales metadata
-
-            # 步骤 1: 写入数据到 "0" dataset
-            # 使用 component 参数指定数据集路径
-            arr_to_save.to_zarr(
-                abs_path,
-                component="0",  # ← 关键：写入 "0" dataset
-                compressor=compressor,
-                overwrite=True,
-                compute=True
-            )
-
-            logger.info(f"[ZarrWriter] Data written to dataset '0'")
-
-            # 步骤 2: 补写 OME-NGFF 元数据到 root group
-            try:
-                z = zarr.open(abs_path, mode='r+')
-                ndim = arr_to_save.ndim
-
-                # 默认轴名称（遵循 OME-NGFF 规范）
-                if ndim == 2:
-                    axes = [{"name": "y"}, {"name": "x"}]
-                elif ndim == 3:
-                    axes = [{"name": "z"}, {"name": "y"}, {"name": "x"}]
-                elif ndim == 4:
-                    axes = [{"name": "c"}, {"name": "z"}, {"name": "y"}, {"name": "x"}]
-                else:
-                    axes = [{"name": f"dim_{i}"} for i in range(ndim)]
-
-                voxel_size = [1.0] * ndim
-
-                # 从输入 metadata 获取 axes 和 voxel_size
-                if metadata:
-                    if metadata.get("axes"):
-                        axes = metadata["axes"]
-                    if metadata.get("voxel_size") and len(metadata["voxel_size"]) == ndim:
-                        voxel_size = metadata["voxel_size"]
-
-                # 构建 multiscales 元数据
-                datasets_meta = [{
-                    "path": "0",  # ← 确保与实际写入路径一致
-                    "coordinateTransformations": [{"type": "scale", "scale": voxel_size}]
-                }]
-
-                z.attrs["multiscales"] = [{
-                    "version": "0.4",
-                    "name": "processed",
-                    "datasets": datasets_meta,
-                    "axes": axes,
-                    "type": "gaussian"  # 可选：表示数据类型
-                }]
-
-                logger.info(f"[ZarrWriter] OME-NGFF metadata written to root group")
-                logger.info(f"[ZarrWriter] Dataset path: '0', Axes: {[a['name'] for a in axes]}, Scale: {voxel_size}")
-
-            except Exception as e:
-                logger.warning(f"[ZarrWriter] Failed to write OME metadata: {e}")
-
-            if callback: callback(-1, 100, "Save Completed!")
-
-        await asyncio.get_running_loop().run_in_executor(None, lambda: run_save(dask_arr))
-        return ()
+        logger.info(f"[ZarrWriter] Lazy write plan ready, {arr_to_save.npartitions} chunks queued")
+        return (final_delayed, {"sink_progress": {"kind": "queue", "total_chunks": arr_to_save.npartitions}})
