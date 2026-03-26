@@ -12,7 +12,8 @@ logger = logging.getLogger("BrainFlow.Plugins")
 CRITICAL_PLUGINS = {
     "nodes.cellpose_node",      # 核心分割节点
     "nodes.ome_zarr_flow",      # IO 节点
-    "nodes.post_processing_nodes",  # 后处理节点
+    "nodes.post_processing_nodes",  # 后处理节点（包含废弃的 DaskLabelStitcher）
+    "nodes.instance_nodes",      # 实例表提取节点（CellposePostProcessor）
 }
 
 

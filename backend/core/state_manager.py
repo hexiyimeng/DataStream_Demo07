@@ -395,6 +395,18 @@ class GlobalStateManager:
         if cleaned_count > 0:
             logger.info(f"[StateManager] Cleaned up {cleaned_count} execution(s), {len(self.executions)} remaining")
 
+        # === GPU 显存清理：每次有 execution 结束时都主动清 ===
+        # 这会强制释放 Cellpose 模型占用的 VRAM（force_clear 不管 refcount）
+        # 如果希望跨 execution 复用模型，应在 main.py 的 startup/shutdown 里手动调用
+        try:
+            # 延迟导入避免循环依赖
+            from nodes.cellpose_node import force_clear_cellpose_model_cache
+            cleared = force_clear_cellpose_model_cache()
+            if cleared > 0:
+                logger.info(f"[StateManager] GPU cache cleared: {cleared} model(s) removed")
+        except Exception as e:
+            logger.debug(f"[StateManager] GPU cache clear skipped: {e}")
+
     def get_failed_execution_logs(self) -> list:
         """获取最近失败 execution 的日志摘要（用于排障）"""
         return list(self._failed_execution_logs)

@@ -6,33 +6,33 @@ import numpy as np
 import pandas as pd
 from core.registry import register_node, ProgressType
 from core.state_manager import state_manager
-from utils.progress_helper import report_progress, report_stage_progress
+from utils.progress_helper import report_stage_progress
+from utils.union_find import UnionFind
 
 logger = logging.getLogger("BrainFlow.PostProcessing")
 
 try:
     import dask_image.ndmeasure
-
     HAS_DASK_IMAGE = True
 except ImportError:
     HAS_DASK_IMAGE = False
 
 
-def _stitch_progress_hook(block, block_info=None, node_id=None, execution_id=None):
-    """
-    用于 DaskLabelStitcher 的进度报告钩子。
-    注意：这个函数必须在模块级别，以便 Dask 可以序列化。
-    """
-    if node_id:
-        report_progress(node_id, execution_id=execution_id)
-    return block
-
+# =============================================================================
+# DaskLabelStitcher (DEPRECATED)
+# =============================================================================
 
 @register_node("DaskLabelStitcher")
 class DaskLabelStitcher:
+    """
+    DEPRECATED: This node is no longer supported.
+
+    Use CellposePostProcessor + DaskStats instead for instance-aware processing.
+    DaskLabelStitcher relied on dask_image.ndmeasure.label which destroys instance IDs.
+    """
     CATEGORY = "BrainFlow/PostProcessing"
-    DISPLAY_NAME = "🧩 Stitch & Re-Label"
-    PROGRESS_TYPE = ProgressType.CHUNK_COUNT  # 每块都会 report_progress
+    DISPLAY_NAME = "[DEPRECATED] Stitch & Re-Label"
+    PROGRESS_TYPE = ProgressType.STATE_ONLY
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -49,329 +49,307 @@ class DaskLabelStitcher:
     FUNCTION = "execute"
 
     def execute(self, mask_dask, overlap, allow_fallback=False, **kwargs):
-        node_id = kwargs.get('_node_id')
-        execution_id = kwargs.get('_execution_id')
+        raise NotImplementedError(
+            "DaskLabelStitcher is deprecated. "
+            "Use CellposePostProcessor + DaskStats for instance-aware processing."
+        )
 
-        # 1. 输入为 None -> 严格失败
-        if mask_dask is None:
-            raise ValueError("DaskLabelStitcher: mask_dask is None")
 
-        # 2. dask-image 缺失
-        if not HAS_DASK_IMAGE:
-            if allow_fallback:
-                logger.warning(f"[{node_id}] dask-image not installed, returning raw mask (DEGRADED)")
-                state_manager.add_log(
-                    f"⚠️ [{node_id}] Stitch result degraded: dask-image not installed",
-                    "warning", execution_id=execution_id
-                )
-                return (mask_dask,)
-            raise ImportError(
-                "DaskLabelStitcher requires dask-image. Install with: pip install dask-image"
+# =============================================================================
+# Helper functions for new DaskStats (instance-table-based)
+# =============================================================================
+
+def _build_chunk_adjacency(numblocks):
+    """
+    Build chunk adjacency list from numblocks tuple.
+
+    Returns
+    -------
+    adjacency_edges : list of (chunk_id_a, chunk_id_b) tuples
+        All adjacent chunk pairs (each pair appears once)
+    chunk_index_map : dict mapping chunk_id -> block_idx tuple
+    """
+    chunk_index_map = {}
+    for block_idx in np.ndindex(numblocks):
+        chunk_id = '_'.join(str(i) for i in block_idx)
+        chunk_index_map[chunk_id] = block_idx
+
+    adjacency_edges = set()
+    for chunk_id, block_idx in chunk_index_map.items():
+        for axis in range(len(block_idx)):
+            # Positive direction neighbor
+            if block_idx[axis] < numblocks[axis] - 1:
+                neighbor_idx = list(block_idx)
+                neighbor_idx[axis] += 1
+                neighbor_id = '_'.join(str(i) for i in neighbor_idx)
+                # Store canonical pair (smaller id first)
+                pair = (chunk_id, neighbor_id) if chunk_id < neighbor_id else (neighbor_id, chunk_id)
+                adjacency_edges.add(pair)
+
+    return list(adjacency_edges), chunk_index_map
+
+
+def _estimate_diameter(voxel_count):
+    """Estimate equivalent spherical diameter from voxel count (assuming cubic voxels)."""
+    if voxel_count <= 0:
+        return 0.0
+    # V = (4/3) * pi * r^3, d = 2r
+    # d = 2 * (V * 3/4 / pi)^(1/3)
+    return 2.0 * ((voxel_count * 3.0 / 4.0 / 3.14159) ** (1.0 / 3.0))
+
+
+def _bbox_overlap_score(row_a, row_b):
+    """
+    Compute bbox overlap score between two instances.
+    Returns IoU-like score in [0, 1]: 1 = perfect overlap, 0 = no overlap.
+    """
+    # z
+    overlap_z = max(0, min(row_a['bbox_z1'], row_b['bbox_z1']) - max(row_a['bbox_z0'], row_b['bbox_z0']))
+    union_z = max(row_a['bbox_z1'], row_b['bbox_z1']) - min(row_a['bbox_z0'], row_b['bbox_z0'])
+    # y
+    overlap_y = max(0, min(row_a['bbox_y1'], row_b['bbox_y1']) - max(row_a['bbox_y0'], row_b['bbox_y0']))
+    union_y = max(row_a['bbox_y1'], row_b['bbox_y1']) - min(row_a['bbox_y0'], row_b['bbox_y0'])
+    # x
+    overlap_x = max(0, min(row_a['bbox_x1'], row_b['bbox_x1']) - max(row_a['bbox_x0'], row_b['bbox_x0']))
+    union_x = max(row_a['bbox_x1'], row_b['bbox_x1']) - min(row_a['bbox_x0'], row_b['bbox_x0'])
+
+    if union_z == 0 or union_y == 0 or union_x == 0:
+        return 0.0
+
+    overlap_vol = overlap_z * overlap_y * overlap_x
+    union_vol = union_z * union_y * union_x
+
+    return overlap_vol / union_vol if union_vol > 0 else 0.0
+
+
+def _reconcile_chunk_pair(chunk_df_a, chunk_df_b):
+    """
+    First-version reconcile between two adjacent chunks.
+
+    Uses BOTH centroid distance AND bbox overlap to catch split cells.
+    A pair matches if EITHER criterion is strong enough:
+      - centroid distance < 1.5 * max_diameter  OR
+      - bbox overlap score > 0.1 (they occupy similar space in the overlap region)
+
+    This is more robust than centroid distance alone for cross-chunk cells.
+    """
+    if chunk_df_a.empty or chunk_df_b.empty:
+        return []
+
+    edges = []
+
+    # Precompute diameters for all instances
+    diam_a = {row['local_id']: _estimate_diameter(row['voxel_count']) for _, row in chunk_df_a.iterrows()}
+    diam_b = {row['local_id']: _estimate_diameter(row['voxel_count']) for _, row in chunk_df_b.iterrows()}
+
+    for _, inst_a in chunk_df_a.iterrows():
+        key_a = f"{inst_a['chunk_id']}:{inst_a['local_id']}"
+        for _, inst_b in chunk_df_b.iterrows():
+            key_b = f"{inst_b['chunk_id']}:{inst_b['local_id']}"
+
+            max_d = max(diam_a[inst_a['local_id']], diam_b[inst_b['local_id']])
+
+            # Criterion 1: centroid distance
+            dist = np.sqrt(
+                (inst_a['centroid_z'] - inst_b['centroid_z']) ** 2 +
+                (inst_a['centroid_y'] - inst_b['centroid_y']) ** 2 +
+                (inst_a['centroid_x'] - inst_b['centroid_x']) ** 2
             )
+            centroid_ok = (max_d > 0 and dist < max_d * 1.5)
 
-        # 3. 空输入 -> 合法快速路径
-        if mask_dask.size == 0:
-            return (mask_dask,)
+            # Criterion 2: bbox overlap (more robust for split cells)
+            bbox_score = _bbox_overlap_score(inst_a, inst_b)
+            bbox_ok = (bbox_score > 0.05)
 
-        # 4. 执行 stitch
-        try:
-            # dask-image 的 label 会返回 (labeled_array, num_features)
-            labeled_result = dask_image.ndmeasure.label(mask_dask)
-            stitched = labeled_result[0]
-
-            # 注入进度监控 (使用 map_blocks 确保懒执行)
-            final_output = stitched.map_blocks(
-                _stitch_progress_hook,
-                dtype=stitched.dtype,
-                node_id=node_id,
-                execution_id=execution_id
-            )
-
-            return (final_output,)
-
-        except Exception as e:
-            logger.error(f"[{node_id}] Stitch failed: {type(e).__name__}: {e}")
-            if allow_fallback:
-                logger.warning(f"[{node_id}] Falling back to raw mask (DEGRADED)")
-                state_manager.add_log(
-                    f"⚠️ [{node_id}] Stitch result degraded: {type(e).__name__}: {e}",
-                    "warning", execution_id=execution_id
+            if centroid_ok or bbox_ok:
+                score = max(
+                    (1.0 - dist / max_d) if centroid_ok else 0.0,
+                    bbox_score
                 )
-                return (mask_dask,)
-            raise
+                edges.append({
+                    'key_a': key_a,
+                    'key_b': key_b,
+                    'score': score,
+                })
+
+    return edges
 
 
-# 稀疏模式阈值：max_label / unique_labels > 此值时使用 sparse
-SPARSE_THRESHOLD = 10
-
-
-def _chunk_origins_from_chunks(chunks):
-    origins_per_dim = []
-    for dim_chunks in chunks:
-        origins = []
-        offset = 0
-        for chunk_size in dim_chunks:
-            origins.append(offset)
-            offset += chunk_size
-        origins_per_dim.append(origins)
-    return origins_per_dim
-
-
-def _summarize_label_block(block, origin):
+def _run_instance_reconcile_and_stats(instance_partitions, resolution_um, node_id, output_dir, execution_id=None):
     """
-    对单个 label block 做局部统计。
-    返回按 label 聚合的 count 与坐标和，便于后续全局合并。
+    Core function: reconcile instances across chunks and compute final statistics.
 
-    自适应选择 dense/sparse 模式：
-    - 稀疏度 (max_label/unique_labels) > SPARSE_THRESHOLD 时用 sparse
-    - 否则用传统 dense bincount
-    """
-    block = np.asarray(block)
-    if block.size == 0:
-        return {"mode": "sparse", "data": {}}  # 统一用 sparse 格式表示空
+    Phase 1: Collect all partition DataFrames
+    Phase 2: Build adjacency and run pairwise reconcile
+    Phase 3: Union-Find to assign global IDs
+    Phase 4: Aggregate and write CSV
 
-    labels = block.astype(np.int64, copy=False)
-    flat_labels = labels.ravel()
+    Parameters
+    ----------
+    instance_partitions : list of dask.delayed.Delayed
+        Each delivers a pandas.DataFrame of BLOCK_INSTANCE_TABLE
+    resolution_um : float
+        Voxel size in microns
+    node_id : str
+    output_dir : str
+        Directory to write the CSV file
+    execution_id : str
 
-    # 获取非零 label 的统计信息
-    fg_mask = flat_labels > 0
-    if not np.any(fg_mask):
-        return {"mode": "sparse", "data": {}}
-
-    unique_labels, counts = np.unique(flat_labels[fg_mask], return_counts=True)
-    unique_count = len(unique_labels)
-    max_label = int(unique_labels.max())
-
-    # 判定是否使用 sparse 模式
-    sparsity = max_label / unique_count if unique_count > 0 else 1
-    use_sparse = sparsity > SPARSE_THRESHOLD
-
-    ndim = labels.ndim
-
-    if use_sparse:
-        # === Sparse 模式：只存储实际存在的 label ===
-        result = {}
-        local_coords = np.indices(labels.shape, dtype=np.float64)
-
-        for i, label_id in enumerate(unique_labels):
-            label_id = int(label_id)
-            label_mask = flat_labels == label_id
-            coord_sums = []
-            for axis, coord_grid in enumerate(local_coords):
-                coord_sums.append(
-                    float((coord_grid.ravel()[label_mask] + float(origin[axis])).sum())
-                )
-            result[label_id] = {
-                "count": int(counts[i]),
-                "sums": coord_sums
-            }
-
-        return {"mode": "sparse", "data": result}
-
-    else:
-        # === Dense 模式：保留原有 bincount 逻辑 ===
-        dense_counts = np.zeros(max_label + 1, dtype=np.int64)
-        for i, label_id in enumerate(unique_labels):
-            dense_counts[label_id] = counts[i]
-
-        local_coords = np.indices(labels.shape, dtype=np.float64)
-        dense_sums = [np.zeros(max_label + 1, dtype=np.float64) for _ in range(ndim)]
-
-        for i, label_id in enumerate(unique_labels):
-            label_mask = flat_labels == label_id
-            for axis, coord_grid in enumerate(local_coords):
-                dense_sums[axis][label_id] = (
-                    coord_grid.ravel()[label_mask] + float(origin[axis])
-                ).sum()
-
-        return {
-            "mode": "dense",
-            "max_label": max_label,
-            "counts": dense_counts,
-            "sums": dense_sums
-        }
-
-
-def _aggregate_stats_summaries(summaries, resolution_microns, node_id, execution_id=None):
-    """
-    聚合所有 block summary，并写出 CSV。
-
-    统一使用稀疏字典 merge，避免按全局 max_label 预分配大数组。
-    支持 dense 和 sparse 两种 summary 格式。
+    Returns
+    -------
+    str : path to output CSV file
     """
     if execution_id:
-        report_stage_progress(node_id, 20, 100, "Aggregating chunk summaries...", execution_id=execution_id)
+        report_stage_progress(node_id, 10, 100, "Collecting instance partitions...", execution_id=execution_id)
 
-    if not summaries:
+    # Phase 1: Collect all partitions
+    # instance_partitions is list[dask.delayed.Delayed]
+    # Use dask.compute to get all DataFrames at once
+    all_dfs = list(dask.compute(*instance_partitions))
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+
+    if combined_df.empty:
         if execution_id:
-            report_stage_progress(node_id, 100, 100, "No cells detected", execution_id=execution_id)
-        return "No cells detected"
-
-    # === 统一转成稀疏字典格式 ===
-    merged = {}  # label_id -> {"count": int, "sums": [float, ...]}
-    ndim = None
-
-    for summary in summaries:
-        mode = summary.get("mode", "dense")  # 兼容旧格式
-
-        if mode == "sparse":
-            # Sparse 格式：直接 merge
-            sparse_data = summary.get("data", {})
-            if not sparse_data:
-                continue
-            if ndim is None and sparse_data:
-                first_item = next(iter(sparse_data.values()))
-                ndim = len(first_item.get("sums", []))
-
-            for label_id, data in sparse_data.items():
-                label_id = int(label_id)
-                count = data.get("count", 0)
-                sums = data.get("sums", [])
-
-                if label_id not in merged:
-                    merged[label_id] = {"count": 0, "sums": [0.0] * len(sums) if sums else []}
-
-                merged[label_id]["count"] += count
-                for i, s in enumerate(sums):
-                    merged[label_id]["sums"][i] += s
-
-        else:
-            # Dense 格式（兼容旧格式）：转成 sparse 再 merge
-            max_label = summary.get("max_label", 0)
-            counts = summary.get("counts")
-            sums = summary.get("sums", [])
-
-            if counts is None or max_label <= 0:
-                continue
-
-            if ndim is None:
-                ndim = len(sums)
-
-            # 只处理非零 label
-            non_zero_indices = np.nonzero(counts[1:max_label + 1] > 0)[0] + 1
-
-            for label_id in non_zero_indices:
-                label_id = int(label_id)
-                count = int(counts[label_id])
-
-                if label_id not in merged:
-                    merged[label_id] = {"count": 0, "sums": [0.0] * ndim}
-
-                merged[label_id]["count"] += count
-                for axis, sum_arr in enumerate(sums):
-                    merged[label_id]["sums"][axis] += float(sum_arr[label_id])
-
-    # === 从 merged 生成 DataFrame ===
-    if not merged:
-        if execution_id:
-            report_stage_progress(node_id, 100, 100, "No cells detected", execution_id=execution_id)
-        return "No cells detected"
+            report_stage_progress(node_id, 100, 100, "No instances found", execution_id=execution_id)
+        return "No instances found"
 
     if execution_id:
-        report_stage_progress(node_id, 40, 100, f"Computing stats for {len(merged)} cells...", execution_id=execution_id)
+        report_stage_progress(node_id, 30, 100, f"Reconciling {len(combined_df)} instances...", execution_id=execution_id)
 
-    # 提取数据
-    ids = np.array(list(merged.keys()), dtype=np.int64)
-    counts_fg = np.array([merged[i]["count"] for i in ids], dtype=np.int64)
+    # Determine numblocks from chunk_ids
+    # chunk_id format: "i0_i1_i2" where each is block index
+    all_chunk_ids = combined_df['chunk_id'].unique()
+    max_indices = [0, 0, 0]
+    for cid in all_chunk_ids:
+        parts = cid.split('_')
+        for i, p in enumerate(parts):
+            if i < 3:  # only first 3 dims
+                max_indices[i] = max(max_indices[i], int(p) + 1)
+    numblocks = tuple(max_indices)
+
+    # Phase 2: Build adjacency and reconcile
+    adjacency_edges, _ = _build_chunk_adjacency(numblocks)
+
+    all_edges = []
+    for chunk_a_id, chunk_b_id in adjacency_edges:
+        df_a = combined_df[combined_df['chunk_id'] == chunk_a_id]
+        df_b = combined_df[combined_df['chunk_id'] == chunk_b_id]
+
+        if df_a.empty or df_b.empty:
+            continue
+
+        edges = _reconcile_chunk_pair(df_a, df_b)
+        if edges:
+            logger.info(f"[Stats] Chunk pair {chunk_a_id}/{chunk_b_id}: {len(edges)} merge candidates")
+        all_edges.extend(edges)
 
     if execution_id:
-        report_stage_progress(node_id, 60, 100, "Processing results...", execution_id=execution_id)
+        report_stage_progress(node_id, 50, 100, f"Found {len(all_edges)} candidate edges, running Union-Find...", execution_id=execution_id)
 
-    # 确定坐标列名
-    if ndim == 3:
-        coord_columns = ['z', 'y', 'x']
-    elif ndim == 2:
-        coord_columns = ['y', 'x']
-    else:
-        coord_columns = [f'dim_{i}' for i in range(ndim)] if ndim else []
+    # Phase 3: Union-Find
+    uf = UnionFind()
+    for edge in all_edges:
+        if edge['score'] > 0.3:  # threshold for first version
+            uf.union(edge['key_a'], edge['key_b'])
 
-    data = {"id": ids, "volume_pixels": counts_fg}
-    for axis, col in enumerate(coord_columns):
-        axis_sum = np.array([merged[i]["sums"][axis] for i in ids])
-        data[col] = axis_sum / counts_fg
-
-    df = pd.DataFrame(data)
-    pixel_size_um3 = resolution_microns ** 3
-    df['volume_um3'] = df['volume_pixels'] * pixel_size_um3
-
-    ordered_cols = ['id'] + [c for c in df.columns if c != 'id']
-    df = df[ordered_cols]
+    components = uf.components()
 
     if execution_id:
-        report_stage_progress(node_id, 80, 100, "Writing CSV...", execution_id=execution_id)
+        report_stage_progress(node_id, 70, 100, f"Found {len(components)} global instances...", execution_id=execution_id)
 
-    output_dir = "./results"
+    # Assign global IDs
+    # Step A: assign IDs to all merged components
+    global_id_map = {}
+    gid = 1
+    for root_key in components:
+        for member_key in components[root_key]:
+            global_id_map[member_key] = gid
+        gid += 1
+
+    # Step B: assign unique IDs to singleton instances (never merged, not in any component)
+    # Build all instance keys from combined_df
+    all_keys = set(
+        combined_df['chunk_id'] + ':' + combined_df['local_id'].astype(str)
+    )
+    for key in all_keys:
+        if key not in global_id_map:
+            global_id_map[key] = gid
+            gid += 1
+
+    logger.info(f"[Stats] Reconciled {len(all_keys)} local instances across {len(adjacency_edges)} chunk pairs → {len(components)} merged, {len(all_keys) - sum(len(m) for m in components.values())} singletons")
+
+    # Vectorized global_id assignment (much faster than apply(axis=1))
+    combined_df['instance_key'] = combined_df['chunk_id'] + ':' + combined_df['local_id'].astype(str)
+    combined_df['global_id'] = combined_df['instance_key'].map(global_id_map).fillna(0).astype(int)
+
+    # Phase 4: Aggregate
+    if execution_id:
+        report_stage_progress(node_id, 80, 100, "Aggregating statistics...", execution_id=execution_id)
+
+    # Simple per-group aggregation: voxel_count sum + weighted centroid
+    # global_id is the grouping key, other columns are aggregated
+    stats_list = []
+    for gid, g in combined_df.groupby('global_id'):
+        total_voxels = g['voxel_count'].sum()
+        if total_voxels == 0:
+            continue
+        stats_list.append({
+            'id': gid,
+            'volume_pixels': total_voxels,
+            'volume_um3': float(total_voxels) * (resolution_um ** 3),
+            'z': float((g['centroid_z'] * g['voxel_count']).sum()) / total_voxels,
+            'y': float((g['centroid_y'] * g['voxel_count']).sum()) / total_voxels,
+            'x': float((g['centroid_x'] * g['voxel_count']).sum()) / total_voxels,
+            'source_chunks': str(set(g['chunk_id'])),
+        })
+
+    stats_df = pd.DataFrame(stats_list)
+
+    # Reorder columns
+    ordered_cols = ['id', 'volume_pixels', 'volume_um3', 'z', 'y', 'x', 'source_chunks']
+    stats_df = stats_df[ordered_cols]
+
+    if execution_id:
+        report_stage_progress(node_id, 90, 100, "Writing CSV...", execution_id=execution_id)
+
+    # Write CSV
     os.makedirs(output_dir, exist_ok=True)
     file_name = f"cell_stats_{node_id}.csv"
     full_path = os.path.abspath(os.path.join(output_dir, file_name))
-    df.to_csv(full_path, index=False)
+    stats_df.to_csv(full_path, index=False)
 
-    logger.info(f"[Stats] Saved to: {full_path} ({len(merged)} cells)")
+    logger.info(f"[Stats] Saved to: {full_path} ({len(stats_df)} global instances)")
     if execution_id:
         report_stage_progress(node_id, 100, 100, "Done", execution_id=execution_id)
+
     return full_path
 
 
-def _run_stats(mask_dask, resolution_microns, node_id, execution_id=None):
-    """
-    兼容 fallback：当上游没有保持为按块 delayed 时，退化到旧路径。
-    优先目标仍是由 execute() 构造分块 summary graph，而不是整图物化。
-
-    WARNING: 此路径会全量物化数组，可能导致内存峰值。仅用于小数据或兼容场景。
-    """
-    if not HAS_DASK_IMAGE:
-        logger.error("dask-image not installed")
-        return "Error: dask-image not installed"
-
-    try:
-        if execution_id:
-            report_stage_progress(node_id, 0, 100, "Initializing...", execution_id=execution_id)
-            report_stage_progress(node_id, 10, 100, "Preparing mask...", execution_id=execution_id)
-
-        if dask.is_dask_collection(mask_dask):
-            # === 内存预估保护 ===
-            estimated_bytes = mask_dask.nbytes if hasattr(mask_dask, 'nbytes') else 0
-            estimated_gb = estimated_bytes / (1024 ** 3)
-            MAX_COMPUTE_GB = 8  # 超过此阈值警告
-
-            if estimated_gb > MAX_COMPUTE_GB:
-                logger.warning(
-                    f"[Stats] Large array fallback compute: {estimated_gb:.2f} GB > {MAX_COMPUTE_GB} GB threshold. "
-                    f"This may cause memory issues. Node: {node_id}"
-                )
-                if execution_id:
-                    report_stage_progress(
-                        node_id, 15, 100,
-                        f"⚠️ Large array ({estimated_gb:.1f}GB) - may cause memory pressure",
-                        execution_id=execution_id
-                    )
-
-            logger.info(f"[Stats] Fallback compute for node {node_id}, size: {estimated_gb:.2f} GB")
-            mask = mask_dask.compute()
-        else:
-            mask = np.asarray(mask_dask)
-
-        origin = tuple(0 for _ in range(mask.ndim))
-        summary = _summarize_label_block(mask, origin)
-        return _aggregate_stats_summaries([summary], resolution_microns, node_id, execution_id=execution_id)
-
-    except Exception as e:
-        import traceback
-        logger.error(f"[Stats] Failed: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        if execution_id:
-            report_stage_progress(node_id, 0, 100, f"Error: {type(e).__name__}: {str(e)}", execution_id=execution_id)
-        return f"Error: {type(e).__name__}: {str(e)}"
-
+# =============================================================================
+# DaskStats (REWRITTEN - instance-table-based)
+# =============================================================================
 
 @register_node("DaskStats")
 class DaskStats:
     """
-    统计分析节点：构建统计计算的 lazy delayed，由 executor 统一触发。
-    进度通过 callback 参数传入 delayed 函数内部上报（STAGE_BASED）。
+    Instance-table-based statistics node.
+
+    DEPRECATED the old mask-based statistics path.
+    CURRENT implementation:
+      - Input: INSTANCE_TABLE (list of per-chunk instance DataFrames from CellposePostProcessor)
+      - Does NOT read mask arrays
+      - Does NOT fallback to mask.compute()
+      - Runs first-version reconcile (centroid distance only)
+      - Assigns global IDs via Union-Find
+      - Aggregates statistics per global instance
+      - Writes CSV
+
+    TODO (v2): Upgrade reconcile to use overlap band pixel intersection
+    TODO (v2): Add boundary_overlap_chunks for proper neighbor detection
+    TODO (v2): Consider dask.dataframe pipeline for large-scale reconciliation
     """
     CATEGORY = "BrainFlow/PostProcessing"
-    DISPLAY_NAME = "📊 Cell Statistics"
+    DISPLAY_NAME = "Instance Statistics (Table-based)"
     OUTPUT_NODE = True
     PROGRESS_TYPE = ProgressType.STAGE_BASED
 
@@ -379,55 +357,32 @@ class DaskStats:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mask_dask": ("DASK_ARRAY",),
+                "instance_partitions": ("INSTANCE_TABLE",),
                 "resolution_microns": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0}),
+                "output_dir": ("STRING", {"default": "./results", "tooltip": "Directory to write the CSV file"}),
             }
         }
 
-    # 返回 DELAYED 类型，executor 识别后统一提交
     RETURN_TYPES = ("DELAYED",)
     RETURN_NAMES = ("stats_task",)
     FUNCTION = "execute"
 
-    def execute(self, mask_dask, resolution_microns=1.0, callback=None, **kwargs):
+    def execute(self, instance_partitions, resolution_microns=1.0, output_dir="./results", **kwargs):
         node_id = kwargs.get('_node_id')
         execution_id = kwargs.get('_execution_id')
 
-        if not HAS_DASK_IMAGE:
-            logger.error("dask-image not installed")
-            return (dask.delayed(lambda: "Error: dask-image not installed")(),)
+        # instance_partitions is list[dask.delayed.Delayed]
+        # The delayed objects will produce pandas.DataFrames when executed
+        logger.info(f"[Stats] Received {len(instance_partitions)} partitions from CellposePostProcessor")
 
-        try:
-            if hasattr(mask_dask, "to_delayed") and hasattr(mask_dask, "chunks"):
-                delayed_blocks = mask_dask.to_delayed().ravel().tolist()
-                origins_per_dim = _chunk_origins_from_chunks(mask_dask.chunks)
+        # Build the lazy execution graph
+        lazy_result = dask.delayed(_run_instance_reconcile_and_stats)(
+            instance_partitions,
+            resolution_microns,
+            node_id,
+            output_dir,
+            execution_id,
+        )
 
-                block_summaries = []
-                flat_index = 0
-                for block_idx in np.ndindex(*mask_dask.numblocks):
-                    origin = tuple(origins_per_dim[axis][block_idx[axis]] for axis in range(mask_dask.ndim))
-                    delayed_block = delayed_blocks[flat_index]
-                    flat_index += 1
-                    block_summaries.append(dask.delayed(_summarize_label_block)(delayed_block, origin))
-
-                lazy_stats = dask.delayed(_aggregate_stats_summaries)(
-                    block_summaries,
-                    resolution_microns,
-                    node_id,
-                    execution_id,
-                )
-            else:
-                # fallback：如果输入已经是具体化对象，走兼容路径；
-                # 如果仍是 dask collection，则保守退化为旧路径（存在内存峰值风险，但语义正确）。
-                lazy_stats = dask.delayed(_run_stats)(
-                    mask_dask,
-                    resolution_microns,
-                    node_id,
-                    execution_id,
-                )
-
-            logger.info(f"[Stats] Lazy stats plan ready for node {node_id}")
-            return (lazy_stats, {"sink_progress": {"kind": "stage_queue"}})
-        except Exception as e:
-            logger.error(f"[Stats] Failed to build lazy stats plan: {e}")
-            return (dask.delayed(lambda msg=f'Error: {e}': msg)(), {"sink_progress": {"kind": "stage_queue"}})
+        logger.info(f"[Stats] Lazy stats plan ready for node {node_id}")
+        return (lazy_result, {"sink_progress": {"kind": "stage_queue"}})

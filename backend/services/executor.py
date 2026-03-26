@@ -687,7 +687,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
                                 persisted_refs.append(persisted_obj)
 
                                 # 等待 persist 物化完成（带超时保护）
-                                PERSIST_TIMEOUT = 3600  # 1小时超时
+                                PERSIST_TIMEOUT = 21600  # 6小时超时
                                 try:
                                     await asyncio.wait_for(
                                         loop.run_in_executor(None, lambda p=persisted_obj: dist_wait(p)),
@@ -1134,24 +1134,41 @@ async def execute_graph(graph: dict, execution_id: str = None):
         mem_monitor.log_snapshot("execution_end_after_cleanup", client=client)
 
         # === 输出内存变化摘要 ===
+        # execution 全程 delta（包含 worker pool 常驻内存，仅供参考）
         mem_monitor.log_delta("execution_start", "execution_end_before_cleanup")
-        mem_monitor.log_delta("execution_end_before_cleanup", "execution_end_after_cleanup")
+        # cleanup 效果 delta（真实反映回收是否生效）
+        cleanup_result = mem_monitor.log_delta("execution_end_before_cleanup", "execution_end_after_cleanup")
 
-        # 检测潜在的内存泄漏
+        # 检测 cleanup 是否有效：如果 cleanup 后内存仍大幅增长，说明有问题
         start_snapshot = mem_monitor.snapshots.get("execution_start")
-        end_snapshot = mem_monitor.snapshots.get("execution_end_after_cleanup")
-        if start_snapshot and end_snapshot:
-            if start_snapshot.get("process_mb") and end_snapshot.get("process_mb"):
-                delta_mb = end_snapshot["process_mb"] - start_snapshot["process_mb"]
-                # 如果 execution 结束后内存增长超过 500MB，警告可能的泄漏
-                if delta_mb > 500:
+        end_before_cleanup = mem_monitor.snapshots.get("execution_end_before_cleanup")
+        end_after_cleanup = mem_monitor.snapshots.get("execution_end_after_cleanup")
+
+        if start_snapshot and end_before_cleanup and end_after_cleanup:
+            start_mb = start_snapshot.get("process_mb", 0)
+            before_mb = end_before_cleanup.get("process_mb", 0)
+            after_mb = end_after_cleanup.get("process_mb", 0)
+
+            if start_mb and before_mb and after_mb:
+                # 1. cleanup 效果：cleanup 前 vs cleanup 后
+                cleanup_released_mb = before_mb - after_mb
+                # 2. execution 全程 delta（包含 worker pool、框架开销等常驻）
+                total_delta_mb = after_mb - start_mb
+
+                # 3. 如果 cleanup 后仍比开始时多 3000MB+，说明有异常残留
+                #    注意：warm dask worker pool 本身会持有多 GB 内存作为常驻，
+                #    阈值设为 3000MB 避免对正常行为误报
+                if total_delta_mb > 3000:
                     logger.warning(
-                        f"[Memory] Potential memory leak detected: "
-                        f"+{delta_mb:.0f}MB retained after execution {execution_id}"
+                        f"[Memory] +{total_delta_mb:.0f}MB retained after execution "
+                        f"(cleanup released {cleanup_released_mb:.0f}MB). "
+                        f"This is expected for long-running dask workers; "
+                        f"GPU VRAM should be freed between executions."
                     )
                 else:
                     logger.info(
-                        f"[Memory] Memory change summary: {mem_monitor.log_summary()}"
+                        f"[Memory] Execution memory: +{total_delta_mb:.0f}MB total, "
+                        f"cleanup released {cleanup_released_mb:.0f}MB. OK."
                     )
 
     return execution_id

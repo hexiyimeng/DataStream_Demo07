@@ -185,6 +185,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     logger.warning(f"Client {client_ip} idle timeout, closing")
                     break
 
+            except WebSocketDisconnect as e:
+                # 1001 = endpoint going away (正常客户端断开)
+                # 其他 code 可能是错误情况
+                if e.code == 1001:
+                    logger.info(f"Client WebSocket disconnected: {client_ip}")
+                else:
+                    logger.warning(f"Client WebSocket disconnected (code={e.code}): {client_ip}")
+                break
+
             except Exception as e:
                 logger.error(f"WebSocket loop error for {client_ip}: {e}", exc_info=True)
                 break
