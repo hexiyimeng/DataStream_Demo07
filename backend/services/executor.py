@@ -104,101 +104,7 @@ def validate_and_prepare_inputs(node_cls, raw_inputs, node_id="Unknown"):
 
 
 # =============================================================================
-# 3. DAG 分析：引用计数 + 共享昂贵节点识别
-# =============================================================================
-def _compute_refcounts(graph: dict, output_nodes: list) -> dict:
-    """
-    计算图中每个节点被 output 节点链路引用的次数。
-    返回 {node_id: ref_count}
-    """
-    refcounts = {nid: 0 for nid in graph}
-
-    def _walk(node_id, visited_path: set):
-        node_data = graph.get(node_id)
-        if not node_data:
-            return
-        for val in node_data.get("inputs", {}).values():
-            if isinstance(val, list) and len(val) == 2:
-                dep_id = val[0]
-                if dep_id in graph:
-                    refcounts[dep_id] += 1
-                    # 防止在同一条 output 链中重复计数（只沿 DAG 向上，不重复访问）
-                    if dep_id not in visited_path:
-                        visited_path.add(dep_id)
-                        _walk(dep_id, visited_path)
-
-    for out_id in output_nodes:
-        refcounts[out_id] += 1
-        _walk(out_id, {out_id})
-
-    return refcounts
-
-
-def _find_shared_expensive_nodes(graph: dict, refcounts: dict) -> set:
-    """
-    找出 refcount > 1 且真正值得共享物化的节点。
-    当前策略：只对 CHUNK_COUNT 且非 OUTPUT_NODE 的节点做共享物化。
-    这符合“共享且昂贵的子图只 materialize 一次”的目标，
-    避免把所有上游一律提前算完。
-    """
-    shared = set()
-    for node_id, count in refcounts.items():
-        if count <= 1:
-            continue
-        node_data = graph.get(node_id)
-        if not node_data:
-            continue
-        class_name = node_data.get("type")
-        NodeCls = NODE_CLASS_MAPPINGS.get(class_name)
-        if NodeCls is None:
-            continue
-        progress_type = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY)
-        is_output = getattr(NodeCls, "OUTPUT_NODE", False)
-        if progress_type == ProgressType.CHUNK_COUNT and not is_output:
-            shared.add(node_id)
-            logger.info(f"[DAGAnalysis] Shared expensive node identified: {node_id} ({class_name}), refcount={count}")
-    return shared
-
-
-def _toposort_shared_nodes(shared_nodes: set, graph: dict) -> list:
-    """
-    返回共享节点的拓扑有序列表（只考虑共享节点之间的相对顺序）。
-    非共享依赖由 schedule_node() 递归处理。
-    """
-    if not shared_nodes:
-        return []
-
-    # 收集共享节点之间的依赖关系
-    shared_deps = {nid: set() for nid in shared_nodes}
-    for nid in shared_nodes:
-        node_data = graph.get(nid)
-        if not node_data:
-            continue
-        for val in node_data.get("inputs", {}).values():
-            if isinstance(val, list) and len(val) == 2:
-                dep_id = val[0]
-                if dep_id in shared_nodes:
-                    shared_deps[nid].add(dep_id)
-
-    # Kahn 算法拓扑排序
-    in_degree = {nid: len(deps) for nid, deps in shared_deps.items()}
-    queue = [nid for nid, deg in in_degree.items() if deg == 0]
-    result = []
-
-    while queue:
-        nid = queue.pop(0)
-        result.append(nid)
-        for other_nid in shared_nodes:
-            if nid in shared_deps.get(other_nid, set()):
-                in_degree[other_nid] -= 1
-                if in_degree[other_nid] == 0:
-                    queue.append(other_nid)
-
-    return result
-
-
-# =============================================================================
-# 4. 进度监控
+# 3. 进度监控
 # =============================================================================
 async def monitor_queue_progress(node_id, total_chunks, progress_callback_func, execution_id=None, stop_event=None):
     """
@@ -399,7 +305,7 @@ async def monitor_stage_progress(node_id, progress_callback_func, execution_id=N
 
 
 # =============================================================================
-# 5. 核心执行器
+# 4. 核心执行器
 # =============================================================================
 async def execute_graph(graph: dict, execution_id: str = None):
     """
@@ -416,7 +322,6 @@ async def execute_graph(graph: dict, execution_id: str = None):
     monitor_tasks = []
     used_progress_queues = set()
     monitor_stop_events = []
-    persisted_refs = []
     sink_futures = []
     client = None
     should_cancel_dask_objects = False
@@ -455,22 +360,11 @@ async def execute_graph(graph: dict, execution_id: str = None):
         if not output_nodes and graph:
             output_nodes = [list(graph.keys())[-1]]
 
-        # --- DAG 分析：识别共享且昂贵的节点 ---
-        refcounts = _compute_refcounts(graph, output_nodes)
-        shared_expensive_nodes = _find_shared_expensive_nodes(graph, refcounts)
-
-        if shared_expensive_nodes:
-            msg = f"🔍 Shared expensive nodes detected (will be persisted): {[graph[n]['type'] for n in shared_expensive_nodes]}"
-            await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
-            state_manager.add_log(msg, "info", execution_id=execution_id)
-
         # --- 共享状态 ---
-        results = {}          # node_id -> output tuple (可能是 persisted future)
-        materialized_results = {}  # node_id -> {slot_idx: persisted_obj} 显式 materialized boundary
+        results = {}          # node_id -> output tuple (保持 lazy)
         tasks = {}            # node_id -> asyncio.Task（防止重复调度）
         monitor_tasks = []    # 进度监控任务列表
         sink_progress_meta = {}  # node_id -> sink monitoring metadata
-        shared_persist_nodes = set()
         loop = asyncio.get_running_loop()
 
         # ==========================================================================
@@ -522,7 +416,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             await state_manager.broadcast(execution_id, broadcast_msg)
 
         # ==========================================================================
-        # 单节点计算（含 persist 逻辑）
+        # 单节点计算（纯 lazy graph 构建）
         # ==========================================================================
         async def _compute_node(node_id):
             NodeCls = None
@@ -550,21 +444,17 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     await asyncio.gather(*(schedule_node(dep_id) for dep_id in dep_ids))
 
                 for arg_name, (dep_id, slot_idx) in pending_inputs.items():
-                    # 优先从 materialized_results 获取（共享边界）
-                    if dep_id in materialized_results and slot_idx in materialized_results[dep_id]:
-                        val = materialized_results[dep_id][slot_idx]
+                    # 从 results 获取上游输出（保持 lazy）
+                    src_result = results[dep_id]
+                    val = None
+                    if isinstance(src_result, tuple):
+                        if slot_idx < len(src_result):
+                            val = src_result[slot_idx]
+                        for item in src_result:
+                            if isinstance(item, dict) and ("axes" in item or "source_path" in item):
+                                upstream_metadatas.append(item)
                     else:
-                        # 回退到 results
-                        src_result = results[dep_id]
-                        val = None
-                        if isinstance(src_result, tuple):
-                            if slot_idx < len(src_result):
-                                val = src_result[slot_idx]
-                            for item in src_result:
-                                if isinstance(item, dict) and ("axes" in item or "source_path" in item):
-                                    upstream_metadatas.append(item)
-                        else:
-                            val = src_result
+                        val = src_result
                     final_inputs[arg_name] = val
 
                 # 2. 实例化节点
@@ -586,7 +476,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 if "global_progress_callback" in inspect.signature(method).parameters:
                     func_args.pop("global_progress_callback", None)
 
-                # 3. 执行
+                # 3. 执行（保持 lazy，不提前 materialization）
                 with dask.annotate(brainflow_node_id=node_id):
                     if asyncio.iscoroutinefunction(method):
                         output = await method(**func_args)
@@ -631,100 +521,9 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     output = tuple(output_list)
 
                 # =================================================================
-                # 5. 核心：共享昂贵节点 → slot 级 persist + 进度监控
+                # 5. 进度上报（不触发 eager computation）
                 # =================================================================
-                if node_id in shared_expensive_nodes and progress_type == ProgressType.CHUNK_COUNT:
-                    client = dask_service.get_client()
-                    if client:
-                        shared_persist_nodes.add(node_id)
-                        materialized_slots = {}  # slot_idx -> persisted_obj
-                        new_output_list = []
-
-                        for slot_idx, item in enumerate(output_list):
-                            # 只对 dask array 做 persist
-                            if da is not None and isinstance(item, da.Array):
-                                total_chunks = item.npartitions
-                                q_name = get_progress_queue_name(node_id, execution_id)
-                                used_progress_queues.add(q_name)
-
-                                # === 内存预估保护 ===
-                                # 估算数组大小，超过阈值时警告
-                                estimated_bytes = item.nbytes if hasattr(item, 'nbytes') else 0
-                                estimated_gb = estimated_bytes / (1024 ** 3)
-                                MAX_PERSIST_GB = 32  # 超过此阈值警告
-
-                                logger.info(
-                                    f"[Persist] Slot [{slot_idx}] of {node_id} ({class_name}), "
-                                    f"{total_chunks} chunks, estimated size: {estimated_gb:.2f} GB"
-                                )
-
-                                if estimated_gb > MAX_PERSIST_GB:
-                                    logger.warning(
-                                        f"[Persist] Large array detected: {estimated_gb:.2f} GB > {MAX_PERSIST_GB} GB threshold. "
-                                        f"Persist may cause memory pressure. Node: {node_id}"
-                                    )
-                                    # 广播警告给前端
-                                    await state_manager.broadcast(execution_id, {
-                                        "type": "log",
-                                        "message": f"⚠️ Large array persist: {estimated_gb:.1f}GB (may cause memory pressure)",
-                                        "executionId": execution_id
-                                    })
-
-                                await progress_callback(node_id, 0, 100, f"Computing (0/{total_chunks}) [shared slot {slot_idx}]")
-
-                                stop_event = threading.Event()
-                                monitor_stop_events.append(stop_event)
-                                monitor_task = asyncio.create_task(
-                                    monitor_queue_progress(node_id, total_chunks, progress_callback, execution_id=execution_id, stop_event=stop_event)
-                                )
-                                monitor_tasks.append(monitor_task)
-
-                                # === 内存快照：persist 前 ===
-                                mem_monitor.log_snapshot(f"before_persist_{node_id}", client=client, level="debug")
-
-                                # persist 该 slot
-                                persisted_obj = client.persist(item)
-                                persisted_refs.append(persisted_obj)
-
-                                # 等待 persist 物化完成（带超时保护）
-                                PERSIST_TIMEOUT = 21600  # 6小时超时
-                                try:
-                                    await asyncio.wait_for(
-                                        loop.run_in_executor(None, lambda p=persisted_obj: dist_wait(p)),
-                                        timeout=PERSIST_TIMEOUT
-                                    )
-                                except asyncio.TimeoutError:
-                                    logger.error(f"[Persist] Timeout after {PERSIST_TIMEOUT}s for node {node_id}")
-                                    stop_event.set()
-                                    raise TimeoutError(f"Persist timeout for node {node_id} ({estimated_gb:.2f} GB)")
-
-                                # === 内存快照：persist 后 ===
-                                mem_monitor.log_snapshot(f"after_persist_{node_id}", client=client, level="debug")
-                                mem_monitor.log_delta(f"before_persist_{node_id}", f"after_persist_{node_id}")
-
-                                # 记录到 materialized_slots
-                                materialized_slots[slot_idx] = persisted_obj
-                                new_output_list.append(persisted_obj)
-                            else:
-                                # 非 dask array 保持原样
-                                new_output_list.append(item)
-
-                        # 存入 materialized_results（显式共享边界）
-                        if materialized_slots:
-                            materialized_results[node_id] = materialized_slots
-                            logger.info(
-                                f"[Persist] Node {node_id} materialized slots: "
-                                f"{list(materialized_slots.keys())}"
-                            )
-
-                        # results 保持原有 tuple 结构
-                        output = tuple(new_output_list)
-                        results[node_id] = output
-
-                # =================================================================
-                # 6. 非共享节点的正常进度监控
-                # =================================================================
-                elif is_lazy and is_dask_array and progress_type == ProgressType.CHUNK_COUNT and dask_obj is not None and node_id not in shared_persist_nodes:
+                if is_lazy and is_dask_array and progress_type == ProgressType.CHUNK_COUNT and dask_obj is not None:
                     total_chunks = dask_obj.npartitions
                     if total_chunks > 0:
                         q_name = get_progress_queue_name(node_id, execution_id)
@@ -751,8 +550,8 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 elif not is_lazy:
                     await progress_callback(node_id, 100, 100, "Done")
 
-                results[node_id] = output
-                return output
+                results[node_id] = output if isinstance(output, tuple) else (output,)
+                return results[node_id]
 
             except Exception as e:
                 error_context = {
@@ -804,41 +603,21 @@ async def execute_graph(graph: dict, execution_id: str = None):
         # ==========================================================================
         # 执行 output 节点
         #
-        # 分两阶段：
-        #   阶段一（构图）：所有节点 execute()，构建 lazy graph。
-        #                   共享昂贵节点 persist + 等待物化（保证只算一次）。
-        #   阶段二（提交）：收集所有 DELAYED 类型的 sink 结果，
-        #                   启动各自进度监控，client.compute([...]) 统一提交，
-        #                   scheduler 看到一张大图，并发执行各 sink 的尾部。
+        # 统一 lazy graph 构建 + unified sink submission：
+        #   Phase 1: 所有节点 execute()，构建 lazy graph
+        #   Phase 2: 收集所有 DELAYED 类型的 sink 结果，
+        #            启动各自进度监控，client.compute([...]) 统一提交
         # ==========================================================================
         if output_nodes:
             logger.info(f"Targets: {output_nodes}")
 
-            if shared_expensive_nodes:
-                # ── Phase 1a: 预热/物化共享节点 ───────────────────────────────
-                ordered_shared = _toposort_shared_nodes(shared_expensive_nodes, graph)
-                if ordered_shared:
-                    shared_types = [graph[n]['type'] for n in ordered_shared]
-                    msg = f"⚙️ Phase 1a: Materializing {len(ordered_shared)} shared node(s): {shared_types}"
-                    await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
-                    state_manager.add_log(msg, "info", execution_id=execution_id)
-                    for nid in ordered_shared:
-                        # 调度共享节点，触发 persist + 阻塞等待物化
-                        await schedule_node(nid)
+            # ── Phase 1: 并发构建所有 output_nodes 的 lazy graph ─────────────────
+            msg = "⚙️ Phase 1: Building unified lazy graph"
+            await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
+            state_manager.add_log(msg, "info", execution_id=execution_id)
+            await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
 
-                # ── Phase 1b: 并发构建所有 output_nodes ─────────────────────
-                msg = f"⚙️ Phase 1b: Building {len(output_nodes)} output(s) concurrently"
-                await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
-                state_manager.add_log(msg, "info", execution_id=execution_id)
-                await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
-
-            else:
-                msg = "⚙️ Phase 1: Building graphs (concurrent)"
-                await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
-                state_manager.add_log(msg, "info", execution_id=execution_id)
-                await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
-
-            # ── 阶段二：统一提交 DELAYED sink ────────────────────────────────────
+            # ── Phase 2: 统一提交 DELAYED sink ────────────────────────────────────
             # 收集所有 output 节点返回的 DELAYED 对象
             delayed_sinks = []   # [(node_id, delayed_obj), ...]
             for nid in output_nodes:
@@ -860,8 +639,6 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     state_manager.add_log(msg, "info", execution_id=execution_id)
 
                     # 为每个 DELAYED sink 启动进度监控
-                    # Writer: CHUNK_COUNT → monitor_queue_progress（chunk 钩子已埋入 lazy graph）
-                    # Stats:  STAGE_BASED → callback 直接透传，无需 queue 监控
                     sink_node_ids = [nid for nid, _ in delayed_sinks]
                     sink_delayed_objs = [d for _, d in delayed_sinks]
 
@@ -947,8 +724,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
                                 if not mt.done():
                                     mt.cancel()
 
-                    # 标记所有 sink 为完成（无论 CHUNK_COUNT 还是 STAGE_BASED）
-                    # monitor 可能因超时/取消而没来得及发 Done，这里统一收口
+                    # 标记所有 sink 为完成
                     for nid, _ in delayed_sinks:
                         node_data = graph.get(nid)
                         class_name = node_data.get("type") if node_data else None
@@ -1080,7 +856,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             if not t.done():
                 t.cancel()
 
-        # 4. 释放 Dask 对象（区分正常完成和取消/异常路径）
+        # 4. 释放 Dask sink futures（正常/异常路径统一处理）
         if client:
             try:
                 if sink_futures:
@@ -1089,57 +865,33 @@ async def execute_graph(graph: dict, execution_id: str = None):
                         client.cancel(sink_futures, force=True)
                         logger.info(f"[Cleanup] Force cancelled {len(sink_futures)} sink futures (abnormal exit)")
                     else:
-                        # 正常完成路径：软释放（让 scheduler 知道我们不再持有引用）
-                        # 注意：不使用 force=True，允许结果保留在 scheduler 缓存中供后续查询
-                        # 但需要显式告知 scheduler 我们已完成使用
+                        # 正常完成路径：软释放
                         logger.info(f"[Cleanup] Released {len(sink_futures)} sink futures (normal completion)")
             except Exception as e:
                 logger.debug(f"[Cleanup] Failed to release sink futures: {e}")
 
-            try:
-                if persisted_refs:
-                    if should_cancel_dask_objects:
-                        # 取消/异常路径：强制取消 persisted 对象
-                        client.cancel(persisted_refs, force=True)
-                        logger.info(f"[Cleanup] Force cancelled {len(persisted_refs)} persisted objects (abnormal exit)")
-                    else:
-                        # 正常完成路径：persisted 对象已被下游消费，可以释放引用
-                        # 但不 force cancel，因为结果可能已被 writer 使用
-                        logger.info(f"[Cleanup] Released {len(persisted_refs)} persisted refs (normal completion)")
-            except Exception as e:
-                logger.debug(f"[Cleanup] Failed to release persisted refs: {e}")
-
         # 5. 清理本地引用（帮助 Python GC）
-        # 这些是局部变量，函数返回后自动回收，但显式清理可以更快释放内存
-        persisted_refs.clear()
         sink_futures.clear()
         monitor_tasks.clear()
         monitor_stop_events.clear()
         tasks.clear()
         results.clear()
-        materialized_results.clear()
         used_progress_queues.clear()
 
-        # 6. 不再主动 close distributed.Queue
-        # Queue 由 scheduler 管理，execution 结束后自动失活
-        # 主动 close 可能导致 worker put 时异常
-
-        # 7. 清理旧的已完成 executions
+        # 6. 清理旧的已完成 executions
         state_manager.cleanup_old_executions()
 
-        # 8. 记录清理完成
+        # 7. 记录清理完成
         logger.info(f"[Cleanup] Execution {execution_id} resources released, should_cancel={should_cancel_dask_objects}")
 
         # === 内存快照：清理后 ===
         mem_monitor.log_snapshot("execution_end_after_cleanup", client=client)
 
         # === 输出内存变化摘要 ===
-        # execution 全程 delta（包含 worker pool 常驻内存，仅供参考）
         mem_monitor.log_delta("execution_start", "execution_end_before_cleanup")
-        # cleanup 效果 delta（真实反映回收是否生效）
         cleanup_result = mem_monitor.log_delta("execution_end_before_cleanup", "execution_end_after_cleanup")
 
-        # 检测 cleanup 是否有效：如果 cleanup 后内存仍大幅增长，说明有问题
+        # 检测 cleanup 是否有效
         start_snapshot = mem_monitor.snapshots.get("execution_start")
         end_before_cleanup = mem_monitor.snapshots.get("execution_end_before_cleanup")
         end_after_cleanup = mem_monitor.snapshots.get("execution_end_after_cleanup")
@@ -1150,14 +902,9 @@ async def execute_graph(graph: dict, execution_id: str = None):
             after_mb = end_after_cleanup.get("process_mb", 0)
 
             if start_mb and before_mb and after_mb:
-                # 1. cleanup 效果：cleanup 前 vs cleanup 后
                 cleanup_released_mb = before_mb - after_mb
-                # 2. execution 全程 delta（包含 worker pool、框架开销等常驻）
                 total_delta_mb = after_mb - start_mb
 
-                # 3. 如果 cleanup 后仍比开始时多 3000MB+，说明有异常残留
-                #    注意：warm dask worker pool 本身会持有多 GB 内存作为常驻，
-                #    阈值设为 3000MB 避免对正常行为误报
                 if total_delta_mb > 3000:
                     logger.warning(
                         f"[Memory] +{total_delta_mb:.0f}MB retained after execution "

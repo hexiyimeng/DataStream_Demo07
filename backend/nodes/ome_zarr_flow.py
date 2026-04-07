@@ -8,21 +8,21 @@ import dask.array as da
 from core.registry import register_node, ProgressType
 from services.dask_service import dask_service
 from core.config import config
-from utils.progress_helper import report_progress
-from core.chunk_policy import ChunkPolicy, reader_init_chunks, writer_minimal_rechunk, RechunkReason
+from core.chunk_policy import ChunkPolicy, reader_init_chunks, RechunkReason
+
 
 # 创建logger
 logger = logging.getLogger("BrainFlow.OMEZarr")
 
 
 # =============================================================================
-#  节点：OME-Zarr 读取器 (Reader) - 改进版 v2
+#  节点：OME-Zarr 读取器 (Reader)
 # =============================================================================
 @register_node("OMEZarrReader")
 class OMEZarrReader:
     CATEGORY = "BrainFlow/IO"
     DISPLAY_NAME = "📂 OME-Zarr Reader (Dask)"
-    DESCRIPTION = "读取 OME-Zarr 格式的数据，支持智能/手动 Chunk 配置。自动识别 2D/3D/4D/5D 数据。"
+    DESCRIPTION = "读取 OME-Zarr 格式的数据，支持 2D/3D/4D/5D 数据。Chunk 模式：default_3d（推荐）/ manual（自定义）。"
     PROGRESS_TYPE = ProgressType.STATE_ONLY  # 仅状态，无百分比
 
     @classmethod
@@ -33,15 +33,12 @@ class OMEZarrReader:
             },
             "optional": {
                 # Chunk 模式选择
-                "chunk_mode": (["default_3d", "auto", "manual"], {"default": "default_3d"}),
+                "chunk_mode": (["default_3d", "manual"], {"default": "default_3d"}),
 
                 # 默认3D模式：x/y/z 方向的分块大小
                 "chunk_z": ("INT", {"default": 64, "min": 1, "max": 1024, "label": "Z Chunk Size"}),
                 "chunk_y": ("INT", {"default": 64, "min": 1, "max": 1024, "label": "Y Chunk Size"}),
                 "chunk_x": ("INT", {"default": 64, "min": 1, "max": 1024, "label": "X Chunk Size"}),
-
-                # 智能模式：目标 chunk 大小（MB）
-                "target_chunk_mb": ("FLOAT", {"default": 256, "min": 64, "max": 1024, "label": "Target Chunk Size (MB)"}),
 
                 # 手动模式：使用字符串配置
                 "chunk_config": ("STRING", {
@@ -51,7 +48,7 @@ class OMEZarrReader:
                     "placeholder": "Manual config"
                 }),
 
-                # 或者使用简化的单值配置
+                # 简化的单值配置
                 "chunk_size": ("INT", {
                     "default": 512,
                     "min": 64,
@@ -70,7 +67,6 @@ class OMEZarrReader:
 
     def load_zarr(self, file_path, chunk_mode="default_3d",
                   chunk_z=64, chunk_y=64, chunk_x=64,
-                  target_chunk_mb=256,
                   chunk_config="", chunk_size=512, keep_first_dim=True,
                   callback=None, **kwargs):
         node_id = kwargs.get('_node_id', 'unknown')
@@ -93,49 +89,7 @@ class OMEZarrReader:
         except (OSError, ValueError) as e:
             raise ValueError(f"[Node {node_id}] Invalid path")
 
-        # 3. 路径白名单校验
-        def _get_allowed_data_dirs():
-            """获取允许的数据目录白名单（优先环境变量，其次默认值）"""
-            env_dirs = os.getenv("BRAINFLOW_DATA_DIRS", "")
-            if env_dirs:
-                # 环境变量：冒号分隔（Windows 用分号）
-                sep = ";" if os.name == "nt" else ":"
-                dirs = [d.strip() for d in env_dirs.split(sep) if d.strip()]
-                if dirs:
-                    return dirs
-            # 默认白名单：常见数据目录
-            # 注意：生产环境应通过环境变量配置，不要在这里添加敏感路径
-            default_dirs = ["./data", os.path.expanduser("~/data")]
-            # Windows: 添加 E:\Users 作为默认允许（仅开发环境）
-            if os.name == "nt" and os.path.exists("E:\\Users"):
-                default_dirs.append("E:\\Users")
-            return default_dirs
-
-        def _is_path_allowed(path: str, allowed_dirs: list) -> bool:
-            """检查路径是否在允许的目录内（严格父子关系判断）"""
-            for base in allowed_dirs:
-                try:
-                    # 白名单目录也要 resolve（处理 symlink）
-                    base_real = os.path.realpath(base)
-                    # 使用 commonpath 判断严格的父子关系
-                    # commonpath 要求 path 必须是 base 的子路径
-                    common = os.path.commonpath([path, base_real])
-                    if common == base_real:
-                        return True
-                except (ValueError, OSError):
-                    # 不同驱动器或路径不存在，跳过
-                    continue
-            return False
-
-        allowed_dirs = _get_allowed_data_dirs()
-        if not _is_path_allowed(resolved_path, allowed_dirs):
-            # 不泄露具体白名单路径，只提示需要配置
-            raise PermissionError(
-                f"[Node {node_id}] Access denied: path outside allowed data directories. "
-                f"Set BRAINFLOW_DATA_DIRS environment variable to configure allowed paths."
-            )
-
-        # 校验通过，使用规范化后的路径
+        # 3. 校验通过，使用规范化后的路径
         file_path = resolved_path
 
         # 4. 存在性和类型检查
@@ -256,11 +210,16 @@ class OMEZarrReader:
             logger.info(f"[ZarrReader] File loaded: {shape_desc}, {total_gb:.2f}GB, {dask_arr.npartitions} chunks")
 
             # ==================== Chunk 配置 (统一策略) ====================
-            # 使用统一的 chunk 策略，避免多处 rechunk
             policy = ChunkPolicy()
             policy.source_chunks = dask_arr.chunksize
 
-            if chunk_mode == "manual" and chunk_config:
+            # chunk_mode 兼容性处理：旧的 "auto" 映射到 "default_3d"
+            effective_chunk_mode = chunk_mode
+            if chunk_mode == "auto":
+                logger.warning("[ZarrReader] chunk_mode='auto' is deprecated, treating as 'default_3d'")
+                effective_chunk_mode = "default_3d"
+
+            if effective_chunk_mode == "manual" and chunk_config:
                 # 手动模式：使用 chunk_config 字符串
                 dask_arr = reader_init_chunks(
                     dask_arr,
@@ -269,7 +228,7 @@ class OMEZarrReader:
                     manual_config=chunk_config,
                     policy=policy
                 )
-            elif chunk_mode == "default_3d":
+            elif effective_chunk_mode == "default_3d":
                 # 默认3D模式：构造 chunk_config 字符串
                 if ndim == 3:
                     config_str = f"{chunk_z},{chunk_y},{chunk_x}"
@@ -285,7 +244,7 @@ class OMEZarrReader:
                     policy=policy
                 )
             else:
-                # 智能模式：使用默认 chunk_size
+                # 默认：使用默认 chunk_size
                 dask_arr = reader_init_chunks(
                     dask_arr,
                     chunk_size=chunk_size,
@@ -363,20 +322,6 @@ class OMEZarrReader:
 
 
 # =============================================================================
-#  工具函数：模块级别的进度报告钩子
-# =============================================================================
-def _write_progress_hook(block, node_id=None, execution_id=None):
-    """
-    Writer 节点的进度报告钩子。
-    在每个 chunk 写出完成后触发进度更新。
-    注意：这个函数必须在模块级别，以便 Dask 可以序列化。
-    """
-    if node_id:
-        report_progress(node_id, execution_id=execution_id)
-    return block
-
-
-# =============================================================================
 #  节点：OME-Zarr 写入器 (Writer)
 # =============================================================================
 def _normalize_axes_for_ngff(axes, ndim):
@@ -398,10 +343,112 @@ def _normalize_axes_for_ngff(axes, ndim):
     return normalized
 
 
-def _write_ome_metadata(write_result, abs_path, ndim, metadata):
+# =============================================================================
+# Block-delayed writer helpers
+# =============================================================================
+
+def _chunk_origins_from_chunks(chunks):
     """
-    写入 OME-NGFF 元数据到 root group。
-    显式依赖 write_result，确保数据写完后才写 metadata。
+    Calculate origin offsets for each chunk along each dimension.
+
+    Parameters
+    ----------
+    chunks : tuple of tuples
+        e.g. ((64, 64, 32), (64, 64, 32)) for 2D or ((8, 4), (64, 64, 64), (64, 64, 64)) for 3D
+
+    Returns
+    -------
+    origins_per_dim : list of lists
+        origins_per_dim[dim][chunk_idx] = start_offset
+    """
+    origins_per_dim = []
+    for dim_chunks in chunks:
+        origins = []
+        offset = 0
+        for chunk_size in dim_chunks:
+            origins.append(offset)
+            offset += chunk_size
+        origins_per_dim.append(origins)
+    return origins_per_dim
+
+
+def _init_zarr_store(abs_path, shape, chunks, dtype, compressor):
+    """
+    Initialize a zarr store / dataset "0" for block-by-block writing.
+
+    Parameters
+    ----------
+    abs_path : str
+        Root path to the zarr group
+    shape : tuple
+        Full array shape
+    chunks : tuple
+        Chunk sizes per dimension (must match dask array chunking)
+    dtype : dtype
+        Data type
+    compressor : numcodecs.codec or None
+        Compression codec
+    """
+    import shutil
+    # Remove existing directory for clean overwrite
+    if os.path.exists(abs_path):
+        shutil.rmtree(abs_path)
+
+    z = zarr.open_group(abs_path, mode='w')
+    z.create_dataset(
+        "0",
+        shape=shape,
+        chunks=chunks,
+        dtype=dtype,
+        compressor=compressor,
+        overwrite=True,
+    )
+    logger.info(f"[ZarrWriter] Store initialized: {abs_path}, shape={shape}, chunks={chunks}")
+
+
+def _write_block_to_region(block, abs_path, region_slices, node_id=None, execution_id=None):
+    """
+    Write a single numpy block to a specific region of the zarr dataset "0".
+
+    Parameters
+    ----------
+    block : ndarray
+        The computed block data (already a concrete ndarray, not lazy)
+    abs_path : str
+        Root path to the zarr group
+    region_slices : tuple of slices
+        Defines where to write this block in the full array
+    node_id : str, optional
+    execution_id : str, optional
+    """
+    try:
+        z = zarr.open(abs_path, mode='r+')
+        z["0"][region_slices] = block
+    except Exception as e:
+        logger.error(f"[ZarrWriter] Failed to write block at region {region_slices}: {e}")
+        raise
+
+    if node_id and execution_id:
+        try:
+            from utils.progress_helper import report_progress
+            report_progress(node_id, execution_id=execution_id, chunk_type="completed")
+        except Exception:
+            pass
+
+
+def _finalize_store(abs_path, ndim, metadata):
+    """
+    Write OME-NGFF metadata after all block writes complete.
+
+    Parameters
+    ----------
+    abs_path : str
+    ndim : int
+    metadata : dict or None
+
+    Returns
+    -------
+    str : abs_path
     """
     try:
         z = zarr.open(abs_path, mode='r+')
@@ -428,18 +475,20 @@ def _write_ome_metadata(write_result, abs_path, ndim, metadata):
         logger.info(f"[ZarrWriter] OME-NGFF metadata written. Axes: {[a['name'] for a in axes]}, Scale: {voxel_size}")
     except Exception as e:
         logger.warning(f"[ZarrWriter] Failed to write OME metadata: {e}")
-    return write_result
 
-
-def _finalize_write_result(write_result, meta_result, abs_path):
-    """
-    最终汇合节点：串联 data write 和 meta write。
-    meta_result 参数虽然函数体中未直接使用，但它的存在让 Dask
-    建立了对 _write_ome_metadata delayed 的隐式依赖，
-    确保 metadata 写完后才返回最终结果。
-    """
     logger.info(f"[ZarrWriter] Write complete: {abs_path}")
     return abs_path
+
+
+def _wait_all_and_finalize(write_results, abs_path, ndim, metadata):
+    """
+    No-op collector that waits for all block write results to complete,
+    then writes metadata and returns the path.
+
+    write_results : list
+        Ignored — only exists to create an explicit data dependency on all writes.
+    """
+    return _finalize_store(abs_path, ndim, metadata)
 
 
 @register_node("OMEZarrWriter")
@@ -492,39 +541,65 @@ class OMEZarrWriter:
         else:
             compressor = numcodecs.Zstd(level=3)
 
-        logger.info(f"[ZarrWriter] Building lazy write plan: {abs_path} | Compressor: {compressor_name}")
+        logger.info(f"[ZarrWriter] Building block-delayed write plan: {abs_path} | Compressor: {compressor_name}")
 
-        # ===== Chunk 策略（pure lazy，不触发计算）=====
-        policy = ChunkPolicy()
-        policy.working_chunks = dask_arr.chunksize
-        arr_to_save = writer_minimal_rechunk(dask_arr, policy=policy)
-        policy.output_chunks = arr_to_save.chunksize
-        logger.info(f"[ZarrWriter] Planned chunks: {policy.output_chunks}, partitions: {arr_to_save.npartitions}")
+        # =========================================================
+        # Block-delayed writer: 每个 block 一个显式写盘任务
+        # 与 Stats 路径完全对等：都从 mask_dask.to_delayed() 分叉
+        # =========================================================
+        arr_to_save = dask_arr
 
-        # ===== 注入进度钩子（map_blocks 埋点，lazy）=====
-        arr_with_progress = arr_to_save.map_blocks(
-            _write_progress_hook,
-            dtype=arr_to_save.dtype,
-            node_id=node_id,
-            execution_id=execution_id
+        # 初始化 zarr store（一次性）
+        _init_zarr_store(abs_path, arr_to_save.shape, arr_to_save.chunksize, str(arr_to_save.dtype), compressor)
+
+        # 获取 per-block delayed 对象（与 CellposePostProcessor 完全相同的方式）
+        delayed_blocks = arr_to_save.to_delayed().ravel().tolist()
+
+        # 计算每个 block 的起始 offset（origin）
+        origins_per_dim = _chunk_origins_from_chunks(arr_to_save.chunks)
+
+        # 为每个 block 创建写盘任务
+        write_tasks = []
+        flat_index = 0
+        for block_idx in np.ndindex(*arr_to_save.numblocks):
+            # 计算该 block 在全局数组中的 region 起始位置
+            origin = tuple(
+                origins_per_dim[axis][block_idx[axis]]
+                for axis in range(arr_to_save.ndim)
+            )
+
+            # 构建 region slices
+            region_slices = tuple(
+                slice(origin[axis], origin[axis] + arr_to_save.chunksize[axis])
+                for axis in range(arr_to_save.ndim)
+            )
+
+            delayed_block = delayed_blocks[flat_index]
+            flat_index += 1
+
+            write_task = dask.delayed(_write_block_to_region)(
+                delayed_block,
+                abs_path,
+                region_slices,
+                node_id,
+                execution_id,
+            )
+            write_tasks.append(write_task)
+
+        logger.info(
+            f"[ZarrWriter] Block-delayed: {len(write_tasks)} blocks, "
+            f"chunks={arr_to_save.chunksize}, partitions={arr_to_save.npartitions}"
         )
 
-        # ===== 构建 lazy 写盘 graph（compute=False）=====
-        # to_zarr(compute=False) 返回 dask.delayed，不触发任何计算
-        lazy_write = arr_with_progress.to_zarr(
+        # =========================================================
+        # 单一 finalize 收尾：显式依赖所有 write_tasks
+        # 不再回到菱形依赖结构
+        # =========================================================
+        final_delayed = dask.delayed(_wait_all_and_finalize)(
+            write_tasks,   # 闭包依赖：确保所有写盘完成后再写 metadata
             abs_path,
-            component="0",
-            compressor=compressor,
-            overwrite=True,
-            compute=False
+            arr_to_save.ndim,
+            metadata,
         )
 
-        # ===== 串联 OME metadata 写入（显式依赖写盘完成） =====
-        ndim = arr_to_save.ndim
-        lazy_meta = dask.delayed(_write_ome_metadata)(lazy_write, abs_path, ndim, metadata)
-
-        # 把 data write 和 meta write 串联成一个最终 delayed
-        final_delayed = dask.delayed(_finalize_write_result)(lazy_write, lazy_meta, abs_path)
-
-        logger.info(f"[ZarrWriter] Lazy write plan ready, {arr_to_save.npartitions} chunks queued")
-        return (final_delayed, {"sink_progress": {"kind": "queue", "total_chunks": arr_to_save.npartitions}})
+        return (final_delayed, {"sink_progress": {"kind": "queue", "total_chunks": len(write_tasks)}})

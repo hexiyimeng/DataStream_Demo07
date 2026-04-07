@@ -175,19 +175,21 @@ def _reconcile_chunk_pair(chunk_df_a, chunk_df_b):
     return edges
 
 
-def _run_instance_reconcile_and_stats(instance_partitions, resolution_um, node_id, output_dir, execution_id=None):
+def _run_instance_reconcile_and_stats(combined_df, resolution_um, node_id, output_dir, execution_id=None):
     """
     Core function: reconcile instances across chunks and compute final statistics.
 
-    Phase 1: Collect all partition DataFrames
+    Phase 1: Already received (concatenated at unified graph level)
     Phase 2: Build adjacency and run pairwise reconcile
     Phase 3: Union-Find to assign global IDs
     Phase 4: Aggregate and write CSV
 
     Parameters
     ----------
-    instance_partitions : list of dask.delayed.Delayed
-        Each delivers a pandas.DataFrame of BLOCK_INSTANCE_TABLE
+    combined_df : pandas.DataFrame
+        Already-concatenated instance table from all partitions.
+        Produced by dask.delayed(pd.concat) at the unified graph level,
+        NOT via dask.compute() inside this function.
     resolution_um : float
         Voxel size in microns
     node_id : str
@@ -202,12 +204,8 @@ def _run_instance_reconcile_and_stats(instance_partitions, resolution_um, node_i
     if execution_id:
         report_stage_progress(node_id, 10, 100, "Collecting instance partitions...", execution_id=execution_id)
 
-    # Phase 1: Collect all partitions
-    # instance_partitions is list[dask.delayed.Delayed]
-    # Use dask.compute to get all DataFrames at once
-    all_dfs = list(dask.compute(*instance_partitions))
-    combined_df = pd.concat(all_dfs, ignore_index=True)
-
+    # Phase 1: combined_df is already the concatenated DataFrame
+    # (dask.compute inside this function has been eliminated)
     if combined_df.empty:
         if execution_id:
             report_stage_progress(node_id, 100, 100, "No instances found", execution_id=execution_id)
@@ -375,9 +373,20 @@ class DaskStats:
         # The delayed objects will produce pandas.DataFrames when executed
         logger.info(f"[Stats] Received {len(instance_partitions)} partitions from CellposePostProcessor")
 
-        # Build the lazy execution graph
+        # ============================================================
+        # Key fix: Concatenate at the unified graph level.
+        # Using dask.delayed(pd.concat) here (instead of dask.compute
+        # inside _run_instance_reconcile_and_stats) ensures all instance
+        # partition tasks are visible in the unified graph submitted to
+        # client.compute(). This allows Dask to share the upstream
+        # Cellpose computation with the Writer path.
+        # ============================================================
+        concat_delayed = dask.delayed(pd.concat)(instance_partitions, ignore_index=True)
+
+        # Build the lazy execution graph — now receives a concrete DataFrame
+        # (already concatenated via the outer graph), not a list to compute
         lazy_result = dask.delayed(_run_instance_reconcile_and_stats)(
-            instance_partitions,
+            concat_delayed,
             resolution_microns,
             node_id,
             output_dir,

@@ -58,66 +58,33 @@ class ChunkPolicy:
         """
         检查分块是否可以安全写入 Zarr。
 
-        Zarr 的 to_zarr 要求：
-        - 最后一个 chunk 不能比其他 chunk 小（除非是边界）
-        - 或者使用 lock=False + overwrite=True 时更宽松
+        对于本项目，标准 Dask 分块（包括自然边界小尾块）可直接写入 Zarr。
+        Dask 的 to_zarr 使用 overwrite=True 时对各种 chunk 布局都很宽容。
 
         Returns:
             是否可以安全写入而不需要 rechunk
         """
-        if arr.chunks is None:
-            return False
-
-        # 检查每个维度
-        for dim_chunks in arr.chunks:
-            if len(dim_chunks) <= 1:
-                continue  # 单 chunk 维度总是安全的
-
-            # 获取非边界 chunk 大小
-            interior_sizes = set(dim_chunks[:-1])
-
-            # 最后一个 chunk 大小
-            last_size = dim_chunks[-1]
-
-            # 如果最后一个 chunk 比内部 chunks 小，且不是边界对齐
-            # 这在某些 zarr 实现中可能有问题
-            for interior in interior_sizes:
-                if last_size < interior and last_size != interior:
-                    # 检查是否是自然边界（数组大小对齐）
-                    # 如果不是自然边界，可能需要 rechunk
-                    return False
-
-        return True
+        # 只要分块信息存在，就认为是可直接写的
+        # 不再因为边界尾块较小而误判为 unsafe
+        return arr.chunks is not None
 
     def needs_writer_rechunk(self, arr: da.Array) -> bool:
         """
         判断 Writer 是否需要 rechunk
 
         只在以下情况才需要：
-        1. 分块严重不规则（可能无法安全写出）
-        2. 单个 chunk（map_overlap 产生的问题）
+        1. 单个 partition（需要拆分成多个以利用并行）
 
-        不规则但不影响写入的分块不需要 rechunk。
+        其他情况（包括自然边界尾块、规则/不规则分块）均不需要 rechunk，
+        保留上游 chunk 拓扑可避免重复计算上游。
         """
-        # 检查是否单个 chunk
         if arr.npartitions == 1:
             self.record_rechunk(RechunkReason.WRITER_SINGLE_CHUNK, arr.chunks, None, "Writer")
             logger.info(f"[ChunkPolicy] Single chunk detected, will rechunk for better parallelism")
             return True
 
-        # 检查是否可以安全写入
-        if not self.is_safe_for_zarr(arr):
-            self.record_rechunk(RechunkReason.WRITER_IRREGULAR, arr.chunks, None, "Writer")
-            logger.info(f"[ChunkPolicy] Chunks not safe for Zarr, will rechunk")
-            return True
-
-        # 检查是否规则（日志记录但不强制 rechunk）
-        if not self.is_uniform(arr):
-            logger.info(
-                f"[ChunkPolicy] Chunks irregular but safe for writing: {arr.chunks}, "
-                f"no rechunk needed"
-            )
-
+        # 不再因为 is_safe_for_zarr 返回 False 而触发 rechunk
+        # 保留上游分块拓扑，避免 writer-side task 重复消费上游
         return False
 
     def get_safe_output_chunks(self, arr: da.Array) -> Tuple:

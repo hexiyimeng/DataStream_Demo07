@@ -228,6 +228,14 @@ def _segment_chunk(block, nid=None, execution_id=None, m_type='cyto', diam=15.0,
                    f_thresh=0.4, c_thresh=0.0, b_size=4):
     import torch
 
+    # Dask metadata inference / dummy probe guard
+    if block is None:
+        return np.zeros((0,), dtype=np.uint16)
+    if not hasattr(block, "shape"):
+        return np.array((), dtype=np.uint16)
+    if block.size == 0:
+        return np.zeros_like(block, dtype=np.uint16)
+
     if np.all(block == 0):
         if nid:
             report_progress(nid, execution_id=execution_id, chunk_type="skipped")
@@ -343,6 +351,7 @@ class DaskCellpose:
             depth=depth,
             boundary='reflect',
             dtype=np.uint16,
+            meta=np.array((), dtype=np.uint16),
             nid=current_node_id,
             execution_id=execution_id,
             m_type=model_type,

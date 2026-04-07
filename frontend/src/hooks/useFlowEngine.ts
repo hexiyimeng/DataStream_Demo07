@@ -33,39 +33,26 @@ export const useFlowEngine = (
   }, [addLog]);
 
   // =========================================================
-  // 核心修复：断线熔断机制 (Kill Switch)
+  // 断线熔断机制 (Kill Switch) - 仅在真正断开时清理
+  // 注意：WebSocket 重连期间保持进度显示，不清零
   // =========================================================
   useEffect(() => {
     if (!isConnected) {
-        // 1. 停止连线动画
+        // 只有在确认连接真正断开（而非重连中）时才清理
+        // 停止连线动画
         setEdges(eds => eds.map(e => {
-            if (!e.animated) return e; // 性能优化：本来没动的就别改了
+            if (!e.animated) return e;
             return { ...e, animated: false };
         }));
-
-        // 2. 强制重置节点状态 (消除僵尸进度条)
-        setNodes(nds => nds.map(n => {
-            // 只有那些看起来"正在运行"的节点才需要重置
-            const isRunningState = (n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100) || n.data.message;
-
-            if (isRunningState) {
-                return {
-                    ...n,
-                    className: n.className ? n.className.replace('node-running-pulse', '').trim() : '',
-                    data: {
-                        ...n.data,
-                        progress: 0,            // 进度归零，绿色进度条消失
-                        message: 'Disconnected' // 或者设为空字符串 "" 以彻底隐藏
-                    }
-                };
-            }
-            return n;
-        }));
+        // 不再清零节点进度！保留最后的执行状态，重连后可继续显示
     }
   }, [isConnected, setEdges, setNodes]);
 
   // 2. WebSocket 连接管理
   useEffect(() => {
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let manualClose = false;
+
     const connectWs = () => {
         // 只有后端开启时才能连上
         const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/run`);
@@ -73,12 +60,16 @@ export const useFlowEngine = (
         ws.onopen = () => {
             setIsConnected(true);
             addLog("System Connected", 'success');
+            manualClose = false;
         };
 
         ws.onclose = () => {
             setIsConnected(false);
-            addLog("System Disconnected", 'warning');
-            setTimeout(connectWs, 3000);
+            if (!manualClose) {
+                addLog("System Disconnected, Reconnecting...", 'warning');
+                // 立即重连，不等待
+                reconnectTimer = setTimeout(connectWs, 500);
+            }
         };
 
         ws.onmessage = (e) => {
@@ -106,16 +97,19 @@ export const useFlowEngine = (
                if (msg.message && msg.message.toLowerCase().includes("error")) addLog(`[${msg.taskId}] ${msg.message}`, 'error');
             }
 
-            // 完成信号
-            if (msg.type === 'done') {
+            // 完成信号（兼容旧前端和新的 execution_finished）
+            if (msg.type === 'done' || msg.type === 'execution_finished') {
                 progressBufferRef.current.clear();
-                addLog(msg.message || "Workflow Finished", 'success');
+                const finishMsg = msg.message || (msg.type === 'execution_finished' ? "Workflow Finished" : "Workflow Finished");
+                const msgType: LogEntry['type'] = (msg as any).status === 'failed' || (msg as any).status === 'cancelled' ? 'error' : 'success';
+                addLog(finishMsg, msgType);
                 setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
                 // 只更新正在运行的节点为完成状态，不是所有节点
                 setNodes((nds) => nds.map(n => {
-                    const wasRunning = n.data.progress > 0 && n.data.progress < 100;
+                    const wasRunning = (n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100);
+                    const finalMessage = (msg as any).status === 'failed' ? 'Error' : (msg as any).status === 'cancelled' ? 'Cancelled' : 'Done';
                     return wasRunning
-                    ? { ...n, className: '', data: { ...n.data, progress: 100, message: 'Done' } }
+                    ? { ...n, className: '', data: { ...n.data, progress: 100, message: finalMessage } }
                     : n;
                 }));
             }
@@ -193,6 +187,8 @@ export const useFlowEngine = (
     tickIntervalRef.current = tick;
 
     return () => {
+      manualClose = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       wsRef.current?.close();
       if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
     };
