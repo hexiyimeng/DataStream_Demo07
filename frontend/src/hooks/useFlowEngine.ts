@@ -23,6 +23,9 @@ export const useFlowEngine = (
   const wsRef = useRef<WebSocket | null>(null);
   const progressBufferRef = useRef<Map<string, ProgressBufferEntry>>(new Map());
   const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // Store interval ID for cleanup
+  const manualCloseRef = useRef(false); // 防止 StrictMode 双挂载导致的竞态：cleanup 关闭 WS 后 old onclose 仍会 fire
+  const mountedRef = useRef(true); // 防止组件卸载后触发 reconnect
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 统一管理重连定时器
 
   // 1. 获取节点定义 (Metadata)
   useEffect(() => {
@@ -50,25 +53,45 @@ export const useFlowEngine = (
 
   // 2. WebSocket 连接管理
   useEffect(() => {
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    let manualClose = false;
+    // 组件卸载时设为 false，阻止所有异步回调
+    mountedRef.current = true;
+
+    const clearReconnectTimer = () => {
+        if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+        }
+    };
 
     const connectWs = () => {
-        // 只有后端开启时才能连上
+        // 组件已卸载则不再建新连接
+        if (!mountedRef.current) return;
+
+        clearReconnectTimer();
         const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/run`);
 
         ws.onopen = () => {
+            if (!mountedRef.current) { ws.close(); return; }
             setIsConnected(true);
             addLog("System Connected", 'success');
-            manualClose = false;
+            manualCloseRef.current = false;
+
+            // 重连恢复：如果 sessionStorage 中有历史 executionId，尝试恢复订阅
+            const storedExecutionId = sessionStorage.getItem('brainflow_execution_id');
+            if (storedExecutionId) {
+                ws.send(JSON.stringify({ command: 'subscribe', executionId: storedExecutionId }));
+                addLog(`Attempting to restore execution ${storedExecutionId}...`, 'info');
+            }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (e) => {
+            if (!mountedRef.current) return; // 组件卸载后的关闭，不处理
             setIsConnected(false);
-            if (!manualClose) {
+            // manualClose=true 是主动 close，不重连
+            // code=1001 是客户端断开（刷新），需要重连
+            if (!manualCloseRef.current) {
                 addLog("System Disconnected, Reconnecting...", 'warning');
-                // 立即重连，不等待
-                reconnectTimer = setTimeout(connectWs, 500);
+                reconnectTimerRef.current = setTimeout(connectWs, 1000);
             }
         };
 
@@ -82,6 +105,12 @@ export const useFlowEngine = (
             if (msg.type === 'warning') addLog(msg.message || '', 'warning');
 
             if (msg.type === 'error') {
+                // 如果是 "Execution not found"（项目重启后旧缓存），清除 sessionStorage
+                const msgText = msg.message || "";
+                if (msgText.includes("not found")) {
+                    sessionStorage.removeItem('brainflow_execution_id');
+                    addLog(`Old execution expired (project restarted). Starting fresh.`, 'warning');
+                }
                 progressBufferRef.current.clear();
                 addLog(msg.message || "Unknown Error", 'error');
                 setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
@@ -97,8 +126,19 @@ export const useFlowEngine = (
                if (msg.message && msg.message.toLowerCase().includes("error")) addLog(`[${msg.taskId}] ${msg.message}`, 'error');
             }
 
+            // execution_started：保存 executionId 到 sessionStorage（刷新页面后可用于恢复）
+            if (msg.type === 'execution_started' && msg.executionId) {
+                sessionStorage.setItem('brainflow_execution_id', msg.executionId);
+            }
+
+            // subscribed：恢复订阅成功
+            if (msg.type === 'subscribed' && msg.executionId) {
+                addLog(`Restored execution ${msg.executionId}`, 'success');
+            }
+
             // 完成信号（兼容旧前端和新的 execution_finished）
             if (msg.type === 'done' || msg.type === 'execution_finished') {
+                sessionStorage.removeItem('brainflow_execution_id');
                 progressBufferRef.current.clear();
                 const finishMsg = msg.message || (msg.type === 'execution_finished' ? "Workflow Finished" : "Workflow Finished");
                 const msgType: LogEntry['type'] = (msg as any).status === 'failed' || (msg as any).status === 'cancelled' ? 'error' : 'success';
@@ -187,8 +227,9 @@ export const useFlowEngine = (
     tickIntervalRef.current = tick;
 
     return () => {
-      manualClose = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      mountedRef.current = false;
+      manualCloseRef.current = true;
+      clearReconnectTimer();
       wsRef.current?.close();
       if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
     };

@@ -37,6 +37,34 @@ def _chunk_origins_from_chunks(chunks):
     return origins_per_dim
 
 
+def _build_chunk_adjacency(numblocks):
+    """
+    Build chunk adjacency list from numblocks tuple.
+
+    Returns
+    -------
+    adjacency_edges : list of (chunk_id_a, chunk_id_b) tuples
+        All adjacent chunk pairs (each pair appears once)
+    chunk_index_map : dict mapping chunk_id -> block_idx tuple
+    """
+    chunk_index_map = {}
+    for block_idx in np.ndindex(numblocks):
+        chunk_id = '_'.join(str(i) for i in block_idx)
+        chunk_index_map[chunk_id] = block_idx
+
+    adjacency_edges = set()
+    for chunk_id, block_idx in chunk_index_map.items():
+        for axis in range(len(block_idx)):
+            if block_idx[axis] < numblocks[axis] - 1:
+                neighbor_idx = list(block_idx)
+                neighbor_idx[axis] += 1
+                neighbor_id = '_'.join(str(i) for i in neighbor_idx)
+                pair = (chunk_id, neighbor_id) if chunk_id < neighbor_id else (neighbor_id, chunk_id)
+                adjacency_edges.add(pair)
+
+    return list(adjacency_edges), chunk_index_map
+
+
 def _extract_chunk_instances(mask_block, origin, chunk_id, resolution_um=1.0):
     """
     Extract instance metadata from a single Cellpose mask block.
@@ -224,8 +252,13 @@ class CellposePostProcessor:
     Consumes mask_dask from DaskCellpose and produces per-chunk instance tables.
     Does NOT re-run Cellpose - only reads the existing mask.
 
-    Output: list[dask.delayed.Delayed] - one pandas DataFrame per chunk.
-    Each DataFrame contains instance-level metadata:
+    Output: dict with keys:
+      - partitions: list[dask.delayed.Delayed] — one per-chunk DataFrame
+      - numblocks: tuple — dask array numblocks
+      - adjacency_edges: list[(chunk_a, chunk_b)] — adjacent chunk pairs
+      - resolution_um: float
+
+    Each partition DataFrame contains instance-level metadata:
       chunk_id, local_id, centroid_z/y/x, voxel_count,
       touches_boundary, boundary_overlap_chunks, bbox_*
 
@@ -281,7 +314,18 @@ class CellposePostProcessor:
             )
             partition_delayed_list.append(chunk_task)
 
-        logger.info(f"[CellposePostProcessor] Created {len(partition_delayed_list)} partition tasks for node {node_id}")
+        # Build adjacency edges from actual numblocks
+        numblocks = mask_dask.numblocks
+        adjacency_edges, _ = _build_chunk_adjacency(numblocks)
 
-        # Return as list of Delayed (not tuple - it's a single output)
-        return (partition_delayed_list,)
+        logger.info(f"[CellposePostProcessor] Created {len(partition_delayed_list)} partition tasks, "
+                    f"{len(adjacency_edges)} adjacent pairs for node {node_id}")
+
+        # Return richer payload: dict instead of plain list
+        payload = {
+            'partitions': partition_delayed_list,   # list[dask.delayed.Delayed]
+            'numblocks': numblocks,
+            'adjacency_edges': adjacency_edges,       # list[(chunk_a, chunk_b)]
+            'resolution_um': resolution_microns,
+        }
+        return (payload,)

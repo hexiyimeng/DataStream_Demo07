@@ -43,7 +43,7 @@ def register_node(name: str):
 
 def get_node_info():
     """
-    生成符合 ComfyUI 标准的前端协议 JSON
+    生成符合标准的前端协议 JSON
     """
     info = {}
     for name, cls in NODE_CLASS_MAPPINGS.items():

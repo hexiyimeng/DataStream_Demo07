@@ -38,11 +38,13 @@ export interface NodeData extends Record<string, unknown> {
 
 // === WebSocket 消息结构 ===
 export interface WSMessage {
-  type: 'log' | 'success' | 'warning' | 'progress' | 'error' | 'done' | 'executed';
+  type: 'log' | 'success' | 'warning' | 'progress' | 'error' | 'done' | 'executed' | 'execution_started' | 'subscribed';
   message?: string;
   taskId?: string; // 对应节点的 ID
   progress?: number | null; // 百分比进度 (0-100)，state_only 时为 null
   progressType?: ProgressType; // 进度类型：chunk_count / state_only / stage_based
+  executionId?: string;
+  status?: 'running' | 'failed' | 'cancelled'; // execution_finished 的状态
 }
 
 // === 工作流 (Workflow) ===

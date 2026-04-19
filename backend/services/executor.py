@@ -347,10 +347,10 @@ async def execute_graph(graph: dict, execution_id: str = None):
         # 广播启动消息（带 execution_id）
         await state_manager.broadcast(execution_id, {
             "type": "log",
-            "message": "🚀 Engine Started...",
+            "message": "Engine Started...",
             "executionId": execution_id
         })
-        state_manager.add_log("🚀 Engine Started...", "info", execution_id=execution_id)
+        state_manager.add_log("Engine Started...", "info", execution_id=execution_id)
 
         # --- 找出所有 output 节点 ---
         output_nodes = [
@@ -460,7 +460,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 # 2. 实例化节点
                 NodeCls = NODE_CLASS_MAPPINGS.get(class_name)
                 if NodeCls is None:
-                    raise ValueError(f"❌ Node '{class_name}' not found!")
+                    raise ValueError(f" Node '{class_name}' not found!")
 
                 progress_type = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY)
 
@@ -612,7 +612,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             logger.info(f"Targets: {output_nodes}")
 
             # ── Phase 1: 并发构建所有 output_nodes 的 lazy graph ─────────────────
-            msg = "⚙️ Phase 1: Building unified lazy graph"
+            msg = "Phase 1: Building unified lazy graph"
             await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
             state_manager.add_log(msg, "info", execution_id=execution_id)
             await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
@@ -634,7 +634,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             if delayed_sinks:
                 client = dask_service.get_client()
                 if client:
-                    msg = f"⚙️ Phase 2: Submitting {len(delayed_sinks)} sink(s) to scheduler (unified graph)"
+                    msg = f"Phase 2: Submitting {len(delayed_sinks)} sink(s) to scheduler (unified graph)"
                     await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
                     state_manager.add_log(msg, "info", execution_id=execution_id)
 
@@ -680,7 +680,11 @@ async def execute_graph(graph: dict, execution_id: str = None):
                             await progress_callback(nid, -1, 100, "Queued...")
 
                     # 统一提交：scheduler 拿到一张覆盖所有 sink 的大图
-                    futures = client.compute(sink_delayed_objs)
+                    # 注意：client.compute() 是同步阻塞调用，需要放在线程池执行，
+                    # 否则会阻塞 asyncio 事件循环，导致 WebSocket idle timeout 无法检测
+                    futures = await loop.run_in_executor(
+                        None, lambda: client.compute(sink_delayed_objs)
+                    )
                     if not isinstance(futures, list):
                         futures = [futures]
                     sink_futures.extend(futures)

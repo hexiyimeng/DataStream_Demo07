@@ -21,7 +21,7 @@ logger = logging.getLogger("BrainFlow.OMEZarr")
 @register_node("OMEZarrReader")
 class OMEZarrReader:
     CATEGORY = "BrainFlow/IO"
-    DISPLAY_NAME = "📂 OME-Zarr Reader (Dask)"
+    DISPLAY_NAME = "OME-Zarr Reader"
     DESCRIPTION = "读取 OME-Zarr 格式的数据，支持 2D/3D/4D/5D 数据。Chunk 模式：default_3d（推荐）/ manual（自定义）。"
     PROGRESS_TYPE = ProgressType.STATE_ONLY  # 仅状态，无百分比
 
@@ -197,15 +197,15 @@ class OMEZarrReader:
             # 构建可读的形状描述
             shape_desc = self._format_shape_description(array_shape, dim_names)
 
-            file_info = f"""📊 Zarr File Information:
-  Path: {file_path}
-  Dimensions: {ndim}D {shape_desc}
-  Data Type: {array_dtype}
-  Total Size: {total_gb:.2f} GB
-  Original Chunks: {original_chunks}
-  Original Chunk Size: {np.prod(original_chunks) * z_arr.dtype.itemsize / 1024**2:.2f} MB
-  Number of Chunks: {dask_arr.npartitions}
-"""
+            file_info = f"""Zarr File Information:
+              Path: {file_path}
+              Dimensions: {ndim}D {shape_desc}
+              Data Type: {array_dtype}
+              Total Size: {total_gb:.2f} GB
+              Original Chunks: {original_chunks}
+              Original Chunk Size: {np.prod(original_chunks) * z_arr.dtype.itemsize / 1024**2:.2f} MB
+              Number of Chunks: {dask_arr.npartitions}
+            """
 
             logger.info(f"[ZarrReader] File loaded: {shape_desc}, {total_gb:.2f}GB, {dask_arr.npartitions} chunks")
 
@@ -255,6 +255,24 @@ class OMEZarrReader:
 
             policy.working_chunks = dask_arr.chunksize
             logger.info(f"[ZarrReader] Final chunks: {policy.working_chunks}")
+
+            # ---------- 风险警告：检测大 chunk + GPU 任务组合 ----------
+            if policy.chunk_risk_level != "unknown":
+                logger.warning(f"[ZarrReader] Chunk 风险等级: {policy.chunk_risk_level.upper()}")
+                if policy.chunk_warnings:
+                    for w in policy.chunk_warnings:
+                        logger.warning(f"[ZarrReader] {w}")
+
+            # 额外告警：超大 3D 数据
+            if len(array_shape) >= 3:
+                spatial_shape = array_shape[-3:]
+                if all(s > 5000 for s in spatial_shape):
+                    total_gb_estimate = np.prod(spatial_shape) * z_arr.dtype.itemsize / (1024**3)
+                    logger.warning(
+                        f"[ZarrReader] 超大 3D 数据检测: shape={spatial_shape}, "
+                        f"估算大小≈{total_gb_estimate:.1f} GB (未压缩)。"
+                        f"建议: 配合保守的 chunk 策略使用，避免内存溢出。"
+                    )
 
             # ==================== 构建元数据 ====================
             metadata = {
@@ -521,6 +539,13 @@ class OMEZarrWriter:
         import dask
         node_id = kwargs.get('_node_id', 'unknown_writer')
         execution_id = kwargs.get('_execution_id')
+
+        # 防御：检查输入数组是否有效
+        if dask_arr is None:
+            raise ValueError(
+                f"[ZarrWriter] dask_arr is None. "
+                f"请检查节点 [{node_id}] 的输入是否已连接上游节点。"
+            )
 
         # 路径处理
         if not output_path:
