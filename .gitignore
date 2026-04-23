@@ -1,1 +1,27 @@
+# Virtual environments
+backend/venv/
+venv/
 .venv/
+
+# Python bytecode cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE/editor
+.idea/
+.vscode/
+
+# Frontend artifacts
+frontend/node_modules/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Local model artifacts
+backend/models/
