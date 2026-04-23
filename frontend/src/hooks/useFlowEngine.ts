@@ -1,15 +1,84 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useReducer } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import type { NodeData, WSMessage, NodeSpec, LogEntry } from '../types';
+import type { NodeData, WSMessage, NodeSpec, LogEntry, ExecutionRuntimeState, ExecutionPhase, WebSocketStatus, RunState } from '../types';
 
-// WebSocket 通信、缓冲队列 (Tick Loop) 和执行逻辑
-// 进度缓冲类型定义
+// === Progress buffer entry (full runtime state) ===
 interface ProgressBufferEntry {
   progress: number | null;
   progressType: 'chunk_count' | 'state_only' | 'stage_based';
   message: string;
+  runState?: RunState;
+  progressRole?: string;
+  waitingFor?: string[];
+  device?: string;
+  totalChunks?: number;
+  processedChunks?: number;
+  completedInferenceChunks?: number;
+  skippedChunks?: number;
+  failedChunks?: number;
 }
 
+// === Execution state reducer ===
+type ExecutionAction =
+  | { type: 'START'; executionId: string }
+  | { type: 'SET_PHASE'; phase: ExecutionPhase }
+  | { type: 'SET_SNAPSHOT'; snapshot: Partial<ExecutionRuntimeState> }
+  | { type: 'FINISH'; status: 'succeeded' | 'failed' | 'cancelled'; message?: string }
+  | { type: 'RESET' };
+
+const initialExecutionState: ExecutionRuntimeState = {
+  phase: 'idle',
+  executionId: null,
+  startedAt: null,
+  finishedAt: null,
+  totalNodes: 0,
+  lastError: null,
+  totalChunks: 0,
+  processedChunks: 0,
+  completedInferenceChunks: 0,
+  skippedChunks: 0,
+  failedChunks: 0,
+};
+
+function executionReducer(state: ExecutionRuntimeState, action: ExecutionAction): ExecutionRuntimeState {
+  switch (action.type) {
+    case 'START':
+      return {
+        ...state,
+        phase: 'graph_building',
+        executionId: action.executionId,
+        startedAt: Date.now(),
+        finishedAt: null,
+        lastError: null,
+      };
+    case 'SET_PHASE':
+      return { ...state, phase: action.phase };
+    case 'SET_SNAPSHOT':
+      return { ...state, ...action.snapshot };
+    case 'FINISH':
+      return {
+        ...state,
+        phase: action.status,
+        finishedAt: Date.now(),
+      };
+    case 'RESET':
+      return { ...initialExecutionState };
+    default:
+      return state;
+  }
+}
+
+// ============================================================
+// useFlowEngine — 单连接模型
+//
+// WebSocket 生命周期完全由 useEffect (deps=[]) 控制：
+//   - 挂载 → 建连
+//   - 卸载 → 清理
+//   - 网络断 → onclose 安排重连
+//   - 普通 state 更新（executionState / nodes / logs）→ 绝不触发重连
+//
+// 所有消息处理函数通过 ref 访问最新状态，不通过闭包捕获变化的值。
+// ============================================================
 export const useFlowEngine = (
   nodes: Node<NodeData>[],
   edges: Edge[],
@@ -17,255 +86,415 @@ export const useFlowEngine = (
   setEdges: React.Dispatch<React.SetStateAction<Edge[]>>,
   addLog: (msg: string, type?: LogEntry['type']) => void
 ) => {
-  const [isConnected, setIsConnected] = useState(false);
+  // --- Connection state ---
+  const [websocketStatus, setWebsocketStatus] = useState<WebSocketStatus>('disconnected');
   const [nodeDefs, setNodeDefs] = useState<Record<string, NodeSpec>>({});
 
+  // --- Execution state (reducer) ---
+  const [executionState, dispatchExecution] = useReducer(executionReducer, initialExecutionState);
+
+  // --- Refs ---
   const wsRef = useRef<WebSocket | null>(null);
   const progressBufferRef = useRef<Map<string, ProgressBufferEntry>>(new Map());
-  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // Store interval ID for cleanup
-  const manualCloseRef = useRef(false); // 防止 StrictMode 双挂载导致的竞态：cleanup 关闭 WS 后 old onclose 仍会 fire
-  const mountedRef = useRef(true); // 防止组件卸载后触发 reconnect
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // 统一管理重连定时器
+  const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const finishedRef = useRef(false);
 
-  // 1. 获取节点定义 (Metadata)
+  // ============================================================
+  // 1. 获取节点定义（只在 mount 时）
+  // ============================================================
   useEffect(() => {
     fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/object_info`)
       .then(res => res.json())
       .then(setNodeDefs)
       .catch(err => addLog(`API Error: ${err}`, 'error'));
-  }, [addLog]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally empty — addLog is only called on error path, stable identity
 
-  // =========================================================
-  // 断线熔断机制 (Kill Switch) - 仅在真正断开时清理
-  // 注意：WebSocket 重连期间保持进度显示，不清零
-  // =========================================================
+  // ============================================================
+  // 2. 断线清理：停止连线动画
+  // ============================================================
   useEffect(() => {
-    if (!isConnected) {
-        // 只有在确认连接真正断开（而非重连中）时才清理
-        // 停止连线动画
-        setEdges(eds => eds.map(e => {
-            if (!e.animated) return e;
-            return { ...e, animated: false };
-        }));
-        // 不再清零节点进度！保留最后的执行状态，重连后可继续显示
+    if (websocketStatus === 'disconnected') {
+      setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
     }
-  }, [isConnected, setEdges, setNodes]);
+  }, [websocketStatus, setEdges]);
 
-  // 2. WebSocket 连接管理
+  // ============================================================
+  // 3. Tick Loop：批量将 progress buffer 写回节点
+  // ============================================================
   useEffect(() => {
-    // 组件卸载时设为 false，阻止所有异步回调
+    const tick = setInterval(() => {
+      if (progressBufferRef.current.size === 0) return;
+
+      const updates = new Map(progressBufferRef.current);
+      progressBufferRef.current.clear();
+
+      setNodes(nds => nds.map(n => {
+        if (!updates.has(n.id)) return n;
+        const data = updates.get(n.id)!;
+
+        const progressChanged = n.data.progress !== data.progress;
+        const messageChanged = n.data.message !== data.message;
+        if (!progressChanged && !messageChanged) return n;
+
+        return {
+          ...n,
+          className: data.progressType === 'chunk_count'
+            && data.progress !== null
+            && data.progress > 0
+            && data.progress < 100
+            ? 'node-running-pulse'
+            : '',
+          data: {
+            ...n.data,
+            progress: data.progress ?? 0,
+            message: data.message ?? '',
+            runState: data.runState,
+            progressRole: data.progressRole as NodeData['progressRole'],
+            waitingFor: data.waitingFor,
+            device: data.device,
+            totalChunks: data.totalChunks,
+            processedChunks: data.processedChunks,
+            completedInferenceChunks: data.completedInferenceChunks,
+            skippedChunks: data.skippedChunks,
+            failedChunks: data.failedChunks,
+          }
+        };
+      }));
+    }, 100);
+    tickIntervalRef.current = tick;
+    return () => {
+      if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
+    };
+    // setNodes has stable identity — never causes re-run
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setNodes]);
+
+  // ============================================================
+  // 4. WebSocket 单连接生命周期（deps=[]，真正的单例）
+  //
+  // 所有消息处理逻辑内联在 onmessage handler 中，
+  // 通过 dispatchExecution / progressBufferRef / addLog ref 操作状态，
+  // 不依赖外部闭包中的可变值。
+  // ============================================================
+  useEffect(() => {
+    console.log('[useFlowEngine] connect effect run');
     mountedRef.current = true;
 
     const clearReconnectTimer = () => {
-        if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-        }
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
     };
 
     const connectWs = () => {
-        // 组件已卸载则不再建新连接
+      if (!mountedRef.current) {
+        console.log('[useFlowEngine] connectWs: mountedRef=false, skip');
+        return;
+      }
+
+      // 防止并发：已有 open/connecting 的 socket 不重复建连
+      const existing = wsRef.current;
+      if (existing && existing.readyState === WebSocket.OPEN || existing?.readyState === WebSocket.CONNECTING) {
+        console.log('[useFlowEngine] connectWs: already connecting/open, skip');
+        return;
+      }
+
+      clearReconnectTimer();
+      setWebsocketStatus('reconnecting');
+
+      const wsUrl = `${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/run`;
+      console.log('[useFlowEngine] connecting to', wsUrl);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (!mountedRef.current) { ws.close(); return; }
+        console.log('[useFlowEngine] ws open');
+        setWebsocketStatus('connected');
+        addLog('System Connected', 'success');
+
+        // 重连恢复
+        const storedExecutionId = sessionStorage.getItem('brainflow_execution_id');
+        if (storedExecutionId) {
+          ws.send(JSON.stringify({ command: 'subscribe', executionId: storedExecutionId }));
+          addLog(`Attempting to restore execution ${storedExecutionId}...`, 'info');
+        }
+      };
+
+      ws.onclose = (event) => {
+        console.log('[useFlowEngine] ws close', event.code, event.reason);
         if (!mountedRef.current) return;
+        setWebsocketStatus('disconnected');
+        wsRef.current = null;
 
-        clearReconnectTimer();
-        const ws = new WebSocket(`${import.meta.env.VITE_WS_URL || 'ws://localhost:8000'}/ws/run`);
+        // code=1005 = 客户端未完成 close handshake，不是服务端主动断
+        // 排除 manualClose（manualClose 在 unmount cleanup 中设置）
+        const reconnecting = event.code !== 1000; // 1000 = intentional close
+        if (reconnecting) {
+          console.log('[useFlowEngine] scheduling reconnect in 1s');
+          reconnectTimerRef.current = setTimeout(connectWs, 1000);
+        }
+      };
 
-        ws.onopen = () => {
-            if (!mountedRef.current) { ws.close(); return; }
-            setIsConnected(true);
-            addLog("System Connected", 'success');
-            manualCloseRef.current = false;
+      ws.onerror = (event) => {
+        console.log('[useFlowEngine] ws error', event);
+      };
 
-            // 重连恢复：如果 sessionStorage 中有历史 executionId，尝试恢复订阅
-            const storedExecutionId = sessionStorage.getItem('brainflow_execution_id');
-            if (storedExecutionId) {
-                ws.send(JSON.stringify({ command: 'subscribe', executionId: storedExecutionId }));
-                addLog(`Attempting to restore execution ${storedExecutionId}...`, 'info');
+      // ========================================================
+      // 消息处理（全部内联，通过 ref 访问最新状态）
+      // 不依赖外部闭包中的 executionState / nodes 等可变值
+      // ========================================================
+      ws.onmessage = (e) => {
+        let msg: WSMessage;
+        try {
+          msg = JSON.parse(e.data);
+        } catch {
+          console.error('[useFlowEngine] parse error', e.data);
+          return;
+        }
+
+        const msgType = msg.type;
+
+        // 日志类消息
+        if (msgType === 'log') { addLog(msg.message || '', 'info'); return; }
+        if (msgType === 'success') { addLog(msg.message || '', 'success'); return; }
+        if (msgType === 'warning') { addLog(msg.message || '', 'warning'); return; }
+
+        // error 类型（非 execution_finished）
+        if (msgType === 'error') {
+          const msgText = msg.message || '';
+          if (msgText.includes('not found')) {
+            sessionStorage.removeItem('brainflow_execution_id');
+            addLog('Old execution expired (project restarted). Starting fresh.', 'warning');
+          }
+          progressBufferRef.current.clear();
+          addLog(msgText || 'Unknown Error', 'error');
+          setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
+          return;
+        }
+
+        // execution_started
+        if (msgType === 'execution_started') {
+          if (!msg.executionId) return;
+          finishedRef.current = false;
+          sessionStorage.setItem('brainflow_execution_id', msg.executionId);
+          dispatchExecution({ type: 'START', executionId: msg.executionId });
+          dispatchExecution({ type: 'SET_PHASE', phase: 'submitted' });
+          return;
+        }
+
+        // execution_snapshot（重连恢复）
+        if (msgType === 'execution_snapshot') {
+          dispatchExecution({
+            type: 'SET_SNAPSHOT',
+            snapshot: {
+              phase: msg.status === 'running' ? 'running'
+                : msg.status === 'succeeded' ? 'succeeded'
+                : msg.status === 'failed' ? 'failed'
+                : msg.status === 'cancelled' ? 'cancelled'
+                : 'idle',
+              executionId: msg.executionId ?? null,
+              startedAt: msg.createdAt ? new Date(msg.createdAt).getTime() : null,
+              finishedAt: msg.finishedAt ? new Date(msg.finishedAt).getTime() : null,
+              totalNodes: msg.nodeCount ?? 0,
+              totalChunks: msg.totalChunks ?? 0,
+              processedChunks: msg.processedChunks ?? 0,
+              completedInferenceChunks: msg.completedInferenceChunks ?? 0,
+              skippedChunks: msg.skippedChunks ?? 0,
+              failedChunks: msg.failedChunks ?? 0,
             }
-        };
+          });
+          return;
+        }
 
-        ws.onclose = (e) => {
-            if (!mountedRef.current) return; // 组件卸载后的关闭，不处理
-            setIsConnected(false);
-            // manualClose=true 是主动 close，不重连
-            // code=1001 是客户端断开（刷新），需要重连
-            if (!manualCloseRef.current) {
-                addLog("System Disconnected, Reconnecting...", 'warning');
-                reconnectTimerRef.current = setTimeout(connectWs, 1000);
-            }
-        };
+        // progress
+        if (msgType === 'progress') {
+          if (!msg.taskId) return;
+          progressBufferRef.current.set(msg.taskId, {
+            progress: msg.progress ?? null,
+            progressType: msg.progressType ?? 'state_only',
+            message: msg.message ?? '',
+            runState: msg.runState,
+            progressRole: msg.progressRole,
+            waitingFor: msg.waitingFor,
+            device: msg.device,
+            totalChunks: msg.totalChunks,
+            processedChunks: msg.processedChunks,
+            completedInferenceChunks: msg.completedInferenceChunks,
+            skippedChunks: msg.skippedChunks,
+            failedChunks: msg.failedChunks,
+          });
 
-        ws.onmessage = (e) => {
-          try {
-            const msg: WSMessage = JSON.parse(e.data);
+          // 更新全局 phase
+          if (msg.runState === 'submitted') {
+            dispatchExecution({ type: 'SET_PHASE', phase: 'submitted' });
+          } else if (msg.runState === 'running') {
+            dispatchExecution({ type: 'SET_PHASE', phase: 'running' });
+          }
 
-            // 日志处理
-            if (msg.type === 'log') addLog(msg.message || '', 'info');
-            if (msg.type === 'success') addLog(msg.message || '', 'success');
-            if (msg.type === 'warning') addLog(msg.message || '', 'warning');
-
-            if (msg.type === 'error') {
-                // 如果是 "Execution not found"（项目重启后旧缓存），清除 sessionStorage
-                const msgText = msg.message || "";
-                if (msgText.includes("not found")) {
-                    sessionStorage.removeItem('brainflow_execution_id');
-                    addLog(`Old execution expired (project restarted). Starting fresh.`, 'warning');
+          // 实时聚合 chunk 统计
+          if (msg.totalChunks !== undefined && msg.totalChunks > 0) {
+            const isSink = msg.progressRole === 'chunk_sink' || msg.progressRole === 'stage_sink';
+            if (isSink) {
+              dispatchExecution({
+                type: 'SET_SNAPSHOT',
+                snapshot: {
+                  totalChunks: msg.totalChunks,
+                  processedChunks: msg.processedChunks ?? 0,
+                  completedInferenceChunks: msg.completedInferenceChunks ?? 0,
+                  skippedChunks: msg.skippedChunks ?? 0,
+                  failedChunks: msg.failedChunks ?? 0,
                 }
-                progressBufferRef.current.clear();
-                addLog(msg.message || "Unknown Error", 'error');
-                setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
+              });
             }
+          }
 
-            // 进度缓冲 (Buffer) - 区分状态型和百分比型进度
-            if (msg.taskId) {
-               progressBufferRef.current.set(msg.taskId, {
-                 progress: msg.progress ?? null,
-                 progressType: msg.progressType ?? 'state_only',
-                 message: msg.message ?? ""
-               });
-               if (msg.message && msg.message.toLowerCase().includes("error")) addLog(`[${msg.taskId}] ${msg.message}`, 'error');
-            }
+          if (msg.message?.toLowerCase().includes('error')) {
+            addLog(`[${msg.taskId}] ${msg.message}`, 'error');
+          }
+          return;
+        }
 
-            // execution_started：保存 executionId 到 sessionStorage（刷新页面后可用于恢复）
-            if (msg.type === 'execution_started' && msg.executionId) {
-                sessionStorage.setItem('brainflow_execution_id', msg.executionId);
-            }
+        // execution_finished（唯一权威终态）
+        if (msgType === 'execution_finished') {
+          if (finishedRef.current) return;
+          finishedRef.current = true;
 
-            // subscribed：恢复订阅成功
-            if (msg.type === 'subscribed' && msg.executionId) {
-                addLog(`Restored execution ${msg.executionId}`, 'success');
-            }
+          const status = msg.status ?? 'succeeded';
+          sessionStorage.removeItem('brainflow_execution_id');
+          dispatchExecution({ type: 'FINISH', status, message: msg.message });
 
-            // 完成信号（兼容旧前端和新的 execution_finished）
-            if (msg.type === 'done' || msg.type === 'execution_finished') {
-                sessionStorage.removeItem('brainflow_execution_id');
-                progressBufferRef.current.clear();
-                const finishMsg = msg.message || (msg.type === 'execution_finished' ? "Workflow Finished" : "Workflow Finished");
-                const msgType: LogEntry['type'] = (msg as any).status === 'failed' || (msg as any).status === 'cancelled' ? 'error' : 'success';
-                addLog(finishMsg, msgType);
-                setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
-                // 只更新正在运行的节点为完成状态，不是所有节点
-                setNodes((nds) => nds.map(n => {
-                    const wasRunning = (n.data.progress !== undefined && n.data.progress > 0 && n.data.progress < 100);
-                    const finalMessage = (msg as any).status === 'failed' ? 'Error' : (msg as any).status === 'cancelled' ? 'Cancelled' : 'Done';
-                    return wasRunning
-                    ? { ...n, className: '', data: { ...n.data, progress: 100, message: finalMessage } }
-                    : n;
-                }));
-            }
-          } catch (err) { console.error('WS Error', err); }
-        };
-        wsRef.current = ws;
+          setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
+
+          const logType: LogEntry['type'] = status === 'failed' || status === 'cancelled' ? 'error' : 'success';
+          addLog(msg.message || `Execution ${status}`, logType);
+          progressBufferRef.current.clear();
+          return;
+        }
+
+        // LEGACY: done（succeeded 兼容）
+        if (msgType === 'done') {
+          if (finishedRef.current) return;
+          finishedRef.current = true;
+          sessionStorage.removeItem('brainflow_execution_id');
+          dispatchExecution({ type: 'FINISH', status: 'succeeded', message: msg.message });
+          setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
+          addLog(msg.message || 'Execution succeeded', 'success');
+          progressBufferRef.current.clear();
+          return;
+        }
+
+        // LEGACY: error（非 execution_finished 的 error）
+        if (msgType === 'error' && !finishedRef.current) {
+          // 这个分支已经在上面处理了，保留给 legacy 兼容
+          const status = msg.status === 'cancelled' ? 'cancelled' : 'failed';
+          finishedRef.current = true;
+          sessionStorage.removeItem('brainflow_execution_id');
+          dispatchExecution({ type: 'FINISH', status, message: msg.message });
+          setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
+          addLog(msg.message || `Execution ${status}`, 'error');
+          progressBufferRef.current.clear();
+          return;
+        }
+
+        // subscribed
+        if (msgType === 'subscribed') {
+          if (msg.executionId) {
+            addLog(`Restored execution ${msg.executionId}`, 'success');
+          }
+          return;
+        }
+
+        // ping / pong
+        if (msgType === 'ping' || msgType === 'pong') return;
+      };
     };
+
     connectWs();
 
-    // 3. Tick Loop (React 性能优化的关键)
-    // 使用 ref 存储间隔 ID 以便在回调中清理
-    const tick = setInterval(() => {
-      if (progressBufferRef.current.size > 0) {
-        const updates = new Map(progressBufferRef.current);
-        progressBufferRef.current.clear(); // 清空缓冲
-
-        // 添加日志输出到控制台（调试用）
-        updates.forEach((data, nodeId) => {
-          const progressStr = data.progress !== null ? `${data.progress}%` : 'N/A (state only)';
-          console.log(`[Progress Update] Node ${nodeId}: ${progressStr} (${data.progressType}) - ${data.message}`);
-        });
-
-        try {
-          setNodes((nds) => nds.map((n) => {
-            if (updates.has(n.id)) {
-              const updateData = updates.get(n.id);
-              // 比较逻辑：处理 progress 可能为 null 的情况
-              const oldProgress = n.data.progress;
-              const newProgress = updateData?.progress;
-              const oldMessage = n.data.message;
-              const newMessage = updateData?.message;
-
-              // 检查是否有实际变化
-              const progressChanged = oldProgress !== newProgress;
-              const messageChanged = oldMessage !== newMessage;
-
-              if (!progressChanged && !messageChanged) return n;
-
-              // 添加调试日志
-              console.log(`[useFlowEngine] Updating node ${n.id}:`, {
-                'oldProgress': oldProgress,
-                'newProgress': newProgress,
-                'oldMessage': oldMessage,
-                'newMessage': newMessage,
-                'hasNodeSpec': !!n.data.nodeSpec,
-                'progressType': updateData?.progressType
-              });
-
-              return {
-                  ...n,
-                  // 只有 chunk_count 类型且进度在 0-100 之间时才显示呼吸灯
-                  // state_only 类型 progress 为 null，不显示呼吸灯
-                  className: updateData?.progressType === 'chunk_count' &&
-                             updateData.progress !== null &&
-                             updateData.progress > 0 &&
-                             updateData.progress < 100
-                      ? 'node-running-pulse'
-                      : '',
-                  // 保持原有 nodeSpec，更新 progress（可能为 null）和 message
-                  data: {
-                    ...n.data,
-                    progress: newProgress ?? 0, // null 时使用 0
-                    message: newMessage ?? ""
-                  }
-              };
-            }
-            return n;
-          }));
-        } catch (error) {
-          console.error('[Tick Loop Error]', error);
-        }
-      }
-    }, 100); // 100ms 刷新率
-
-    tickIntervalRef.current = tick;
-
     return () => {
+      console.log('[useFlowEngine] connect effect cleanup (unmount)');
       mountedRef.current = false;
-      manualCloseRef.current = true;
       clearReconnectTimer();
-      wsRef.current?.close();
-      if (tickIntervalRef.current) clearInterval(tickIntervalRef.current);
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'component unmount');
+        wsRef.current = null;
+      }
     };
-  }, [setNodes, setEdges, addLog]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // <-- 关键：只有挂载/卸载触发，无其他依赖
 
-  // 4. 执行 (Run)
+  // =========================================================
+  // 执行 (Run)
+  // =========================================================
   const runFlow = useCallback(() => {
-    if (!wsRef.current || !isConnected) { addLog("Server not connected!", "error"); return; }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      addLog('Server not connected!', 'error');
+      return;
+    }
+    if (websocketStatus !== 'connected') {
+      addLog('Server not connected!', 'error');
+      return;
+    }
 
-    // 构建计算图
+    const executionId = crypto.randomUUID();
+
     const graph: Record<string, { type: string; inputs: Record<string, unknown> }> = {};
-    nodes.forEach((node) => {
+    nodes.forEach(node => {
       const inputs = { ...node.data.values };
-      edges.forEach((edge) => {
+      edges.forEach(edge => {
         if (edge.target === node.id && edge.targetHandle) {
-             inputs[edge.targetHandle] = [edge.source, parseInt(edge.sourceHandle || "0")];
+          inputs[edge.targetHandle] = [edge.source, parseInt(edge.sourceHandle || '0')];
         }
       });
       graph[node.id] = { type: node.data.opType, inputs };
     });
 
-    setEdges((eds) => eds.map(e => ({ ...e, animated: true })));
-    wsRef.current.send(JSON.stringify({ command: 'execute_graph', graph }));
-    addLog("Executing Workflow...", 'info');
+    setEdges(eds => eds.map(e => ({ ...e, animated: true })));
 
-    // 重置进度
-    setNodes((nds) => nds.map(n => ({ ...n, data: { ...n.data, progress: 0, message: 'Pending...' } })));
-  }, [nodes, edges, addLog, setEdges, setNodes, isConnected]);
+    setNodes(nds => nds.map(n => ({
+      ...n,
+      data: {
+        ...n.data,
+        progress: 0,
+        message: 'Pending...',
+        runState: 'ready' as RunState,
+        progressRole: undefined,
+        waitingFor: undefined,
+        device: undefined,
+        totalChunks: undefined,
+        processedChunks: undefined,
+        completedInferenceChunks: undefined,
+        skippedChunks: undefined,
+        failedChunks: undefined,
+        executionId,
+      }
+    })));
 
-  // 5. 停止 (Stop)
+    wsRef.current.send(JSON.stringify({ command: 'execute_graph', graph, executionId }));
+    addLog('Executing Workflow...', 'info');
+  }, [nodes, edges, addLog, setEdges, setNodes, websocketStatus]);
+
+  // =========================================================
+  // 停止 (Stop)
+  // =========================================================
   const stopFlow = useCallback(() => {
-    if (!wsRef.current) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    dispatchExecution({ type: 'SET_PHASE', phase: 'cancelling' });
     wsRef.current.send(JSON.stringify({ command: 'stop_execution' }));
-    setEdges((eds) => eds.map(e => ({ ...e, animated: false })));
-    addLog("Requesting Stop...", 'warning');
+    setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
+    addLog('Requesting Stop...', 'warning');
   }, [addLog, setEdges]);
 
-  return { isConnected, nodeDefs, runFlow, stopFlow };
+  return {
+    websocketStatus,
+    nodeDefs,
+    executionState,
+    runFlow,
+    stopFlow,
+  };
 };

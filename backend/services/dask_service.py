@@ -338,6 +338,3 @@ class DaskService:
 
 
 dask_service = DaskService()
-
-
-dask_service = DaskService()

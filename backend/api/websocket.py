@@ -1,5 +1,4 @@
 import asyncio
-import time
 import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -40,7 +39,6 @@ async def websocket_endpoint(websocket: WebSocket):
     # 心跳配置
     HEARTBEAT_INTERVAL = 30  # 秒
     IDLE_TIMEOUT = 3600  # 60分钟无活动断开 - 支持长时间运行的 Cellpose 任务
-    last_activity = time.time()
 
     # 心跳任务
     async def heartbeat():
@@ -85,7 +83,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 timeout = IDLE_TIMEOUT if not has_running_task else 30
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=timeout)
-                last_activity = time.time()
                 command = data.get("command")
 
                 if command == "execute_graph":
@@ -122,10 +119,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         success = state_manager.cancel_execution(execution_id)
                         if success:
                             logger.info(f"Execution {execution_id} cancelled by user {client_ip}")
+                            # 统一使用 execution_control_ack 类型，实时和历史一致
                             await state_manager.broadcast(execution_id, {
-                                "type": "log",
-                                "message": "Execution terminated by user.",
-                                "executionId": execution_id
+                                "type": "execution_control_ack",
+                                "executionId": execution_id,
+                                "action": "stopped",
+                                "message": "Execution terminated by user."
                             })
                             state_manager.add_log("Execution terminated by user.", "warning", execution_id=execution_id)
                         else:
@@ -140,8 +139,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         })
 
                 elif command == "pong":
-                    # 心跳响应，更新活动时间
-                    last_activity = time.time()
+                    # 心跳响应
                     continue
 
                 elif command == "ping":

@@ -15,54 +15,14 @@ import pandas as pd
 import scipy.ndimage as ndimage
 
 from core.registry import register_node, ProgressType
-from utils.progress_helper import report_stage_progress
+from utils.chunk_helpers import _chunk_origins_from_chunks, _build_chunk_adjacency
 
 logger = logging.getLogger("BrainFlow.InstanceNodes")
 
 
 # =============================================================================
-# Helper functions
+# Helper functions (shared with post_processing_nodes — see utils/chunk_helpers.py)
 # =============================================================================
-
-def _chunk_origins_from_chunks(chunks):
-    """Calculate origin offsets for each chunk along each dimension."""
-    origins_per_dim = []
-    for dim_chunks in chunks:
-        origins = []
-        offset = 0
-        for chunk_size in dim_chunks:
-            origins.append(offset)
-            offset += chunk_size
-        origins_per_dim.append(origins)
-    return origins_per_dim
-
-
-def _build_chunk_adjacency(numblocks):
-    """
-    Build chunk adjacency list from numblocks tuple.
-
-    Returns
-    -------
-    adjacency_edges : list of (chunk_id_a, chunk_id_b) tuples
-        All adjacent chunk pairs (each pair appears once)
-    chunk_index_map : dict mapping chunk_id -> block_idx tuple
-    """
-    chunk_index_map = {}
-    for block_idx in np.ndindex(numblocks):
-        chunk_id = '_'.join(str(i) for i in block_idx)
-        chunk_index_map[chunk_id] = block_idx
-
-    adjacency_edges = set()
-    for chunk_id, block_idx in chunk_index_map.items():
-        for axis in range(len(block_idx)):
-            if block_idx[axis] < numblocks[axis] - 1:
-                neighbor_idx = list(block_idx)
-                neighbor_idx[axis] += 1
-                neighbor_id = '_'.join(str(i) for i in neighbor_idx)
-                pair = (chunk_id, neighbor_id) if chunk_id < neighbor_id else (neighbor_id, chunk_id)
-                adjacency_edges.add(pair)
-
-    return list(adjacency_edges), chunk_index_map
 
 
 def _extract_chunk_instances(mask_block, origin, chunk_id, resolution_um=1.0):

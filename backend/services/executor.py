@@ -50,7 +50,57 @@ def validate_graph_acyclic(graph: dict):
 
 
 # =============================================================================
-# 2. 输入准备
+# 2. 辅助：查找上游 CHUNK_COUNT 节点（用于 waiting_for 推断）
+# =============================================================================
+def _find_upstream_chunk_count_nodes(graph: dict, sink_id: str) -> list:
+    """
+    从指定 sink 节点向后遍历 DAG，收集所有上游 CHUNK_COUNT 节点。
+
+    用于为 sink 节点的 waiting_for 字段提供用户可理解的"我在等谁"信息。
+
+    Returns:
+        list of {"node_id": ..., "display_name": ...} for upstream heavy nodes.
+        只返回 PROGRESS_TYPE == CHUNK_COUNT 的节点（排除纯 STATE_ONLY 的 Reader/ROI）。
+        如果没有上游 CHUNK_COUNT 节点，返回空列表。
+    """
+    if sink_id not in graph:
+        return []
+
+    visited = set()
+    result = []
+
+    def dfs(node_id):
+        if node_id in visited:
+            return
+        visited.add(node_id)
+
+        node_data = graph.get(node_id)
+        if not node_data:
+            return
+
+        class_name = node_data.get("type")
+        NodeCls = NODE_CLASS_MAPPINGS.get(class_name) if class_name else None
+        if NodeCls:
+            pt = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY)
+            if pt == ProgressType.CHUNK_COUNT and node_id != sink_id:
+                display_name = getattr(NodeCls, "DISPLAY_NAME", class_name or node_id)
+                result.append({
+                    "node_id": node_id,
+                    "display_name": display_name,
+                })
+
+        # 继续向后遍历上游
+        for val in node_data.get("inputs", {}).values():
+            if isinstance(val, list) and len(val) == 2:
+                dep_id = val[0]
+                dfs(dep_id)
+
+    dfs(sink_id)
+    return result
+
+
+# =============================================================================
+# 3. 输入准备
 # =============================================================================
 def validate_and_prepare_inputs(node_cls, raw_inputs, node_id="Unknown"):
     final_inputs = {}
@@ -105,6 +155,16 @@ def validate_and_prepare_inputs(node_cls, raw_inputs, node_id="Unknown"):
 
 # =============================================================================
 # 3. 进度监控
+#
+# 状态机说明：
+#   GraphBuilding: 节点 execute() 执行，构建 lazy graph — 不启动 queue monitor
+#   Submitted:      图已提交到 scheduler，等待调度 — 可启动 queue/stage monitor
+#   Running:        有 chunk 在执行 — queue monitor 接收进度消息
+#   Finished:       所有 sink 计算完成 — monitor 已 drain
+#
+# 前端文案约束：
+#   - GraphBuilding 阶段: "Ready (N chunks)" 或 "Queued" — 不得出现 "Computing"
+#   - Submitted/Running 阶段: "Computing (N/M)" — 开始真正 compute 后才显示
 # =============================================================================
 async def monitor_queue_progress(node_id, total_chunks, progress_callback_func, execution_id=None, stop_event=None):
     """
@@ -169,11 +229,12 @@ async def monitor_queue_progress(node_id, total_chunks, progress_callback_func, 
                         f"skipped {skipped_chunks}, failed {failed_chunks} / total {total_chunks}"
                     )
 
-                    if percent > last_percent or processed_chunks == total_chunks:
+                    if percent > last_percent or processed_chunks == total_chunks or processed_chunks == 1:
                         try:
                             future = asyncio.run_coroutine_threadsafe(
                                 progress_callback_func(
                                     node_id, percent, 100, msg_text,
+                                    run_state="running",
                                     # 额外字段供前端使用
                                     extra={
                                         "totalChunks": total_chunks,
@@ -208,12 +269,12 @@ async def monitor_queue_progress(node_id, total_chunks, progress_callback_func, 
 
         result = await loop.run_in_executor(None, blocking_listen)
 
-        # 最终 Done 消息
+        # 最终 Done 消息（显式传 run_state=done，不再依赖推断）
         final_msg = (
             f"Done: inference {completed_chunks}, "
             f"skipped {skipped_chunks}, failed {failed_chunks} / total {total_chunks}"
         )
-        await progress_callback_func(node_id, 100, 100, final_msg)
+        await progress_callback_func(node_id, 100, 100, final_msg, run_state="done")
         return result
 
     except asyncio.CancelledError:
@@ -276,8 +337,13 @@ async def monitor_stage_progress(node_id, progress_callback_func, execution_id=N
                     current = payload.get("current", -1)
                     total = payload.get("total", 100)
                     message = payload.get("message", "")
+                    # 显式推断 run_state，不再依赖隐式推断
+                    if message in done_messages or (total > 0 and current >= total):
+                        run_state = "done"
+                    else:
+                        run_state = "running"
                     future = asyncio.run_coroutine_threadsafe(
-                        progress_callback_func(node_id, current, total, message),
+                        progress_callback_func(node_id, current, total, message, run_state=run_state),
                         loop
                     )
                     future.add_done_callback(
@@ -365,13 +431,23 @@ async def execute_graph(graph: dict, execution_id: str = None):
         tasks = {}            # node_id -> asyncio.Task（防止重复调度）
         monitor_tasks = []    # 进度监控任务列表
         sink_progress_meta = {}  # node_id -> sink monitoring metadata
+        node_dask_objs = {}   # node_id -> dask array（用于中间节点 queue monitor）
         loop = asyncio.get_running_loop()
 
         # ==========================================================================
         # 进度回调
+        # run_state 语义:
+        #   ready      - GraphBuilding 阶段，已构建好 lazy graph，待 submit
+        #   submitted  - 已 submit 到 scheduler，等待调度（中间节点首次进入 running 前短暂状态）
+        #   running    - 正在执行
+        #   done       - 已完成
+        #   failed     - 失败
+        #   cancelled  - 取消
         # ==========================================================================
-        async def progress_callback(node_id, current, total, msg="", extra=None):
+        async def progress_callback(node_id, current, total, msg="", extra=None, run_state=None, waiting_for=None):
             node_progress_type = ProgressType.STATE_ONLY
+            node_device = None
+            node_is_sink = False
             try:
                 node_data = graph.get(node_id)
                 if node_data:
@@ -380,17 +456,42 @@ async def execute_graph(graph: dict, execution_id: str = None):
                         NodeCls = NODE_CLASS_MAPPINGS.get(class_name)
                         if NodeCls:
                             node_progress_type = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY)
+                            node_device = getattr(NodeCls, "DEVICE_HINT", None)
+                            node_is_sink = getattr(NodeCls, "OUTPUT_NODE", False)
             except Exception as e:
                 logger.warning(f"Failed to get progress type for {node_id}: {e}")
 
             if current < 0:
                 progress_value = None
-                logger.info(f"[Progress] {node_id} | {node_progress_type.value} | {msg}")
             else:
                 p = int((current / total) * 100) if total > 0 else 0
                 p = min(100, max(0, p))
                 progress_value = p
-                logger.info(f"[Progress] {node_id} | {node_progress_type.value} | {p}% | {msg}")
+
+            # 推断 run_state（仅当未显式传入时）
+            if run_state is None:
+                msg_lower = msg.lower()
+                if "error" in msg_lower or "fail" in msg_lower:
+                    run_state = "failed"
+                elif msg in ("Done",) and progress_value == 100:
+                    run_state = "done"
+                elif progress_value is not None and progress_value >= 0:
+                    run_state = "running"
+                else:
+                    run_state = "ready"
+
+            # 推断 progress_role（节点在 DAG 中的角色）
+            if node_progress_type == ProgressType.CHUNK_COUNT:
+                progress_role = "chunk_sink" if node_is_sink else "chunk_intermediate"
+            elif node_progress_type == ProgressType.STAGE_BASED:
+                progress_role = "stage_sink"
+            else:
+                progress_role = "state_only"
+
+            if progress_value is None:
+                logger.info(f"[Progress] {node_id} | progressRole={progress_role} | runState={run_state} | {msg}")
+            else:
+                logger.info(f"[Progress] {node_id} | progressRole={progress_role} | runState={run_state} | {progress_value}% | {msg}")
 
             state_manager.update_progress(
                 node_id,
@@ -398,6 +499,11 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 msg,
                 execution_id=execution_id,
                 progress_type=node_progress_type.value,
+                run_state=run_state,
+                device=node_device,
+                waiting_for=waiting_for,
+                progress_role=progress_role,
+                extra=extra if extra and isinstance(extra, dict) else None,
             )
 
             # 构建广播消息
@@ -407,8 +513,14 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 "executionId": execution_id,
                 "progressType": node_progress_type.value,
                 "progress": progress_value,
-                "message": msg
+                "message": msg,
+                "runState": run_state,
+                "progressRole": progress_role,
             }
+            if node_device:
+                broadcast_msg["device"] = node_device
+            if waiting_for:
+                broadcast_msg["waitingFor"] = waiting_for
             # 合并额外字段（如 chunk 分类统计）
             if extra and isinstance(extra, dict):
                 broadcast_msg.update(extra)
@@ -520,22 +632,21 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     output_list.append(copy.copy(upstream_metadatas[0]))
                     output = tuple(output_list)
 
+                # 保存 dask_obj 引用，供 Phase 2 启动中间节点 queue monitor 使用
+                if is_dask_array and dask_obj is not None:
+                    node_dask_objs[node_id] = dask_obj
+
                 # =================================================================
                 # 5. 进度上报（不触发 eager computation）
+                # 注意：此时仍在 Phase 1（GraphBuilding），不要启动 queue/stage monitor！
+                # Phase 2（Submit to scheduler）才会真正启动 monitor。
+                # 前端文案约束：GraphBuilding 阶段不得出现 "Computing"
                 # =================================================================
                 if is_lazy and is_dask_array and progress_type == ProgressType.CHUNK_COUNT and dask_obj is not None:
                     total_chunks = dask_obj.npartitions
                     if total_chunks > 0:
-                        q_name = get_progress_queue_name(node_id, execution_id)
-                        used_progress_queues.add(q_name)
-                        await progress_callback(node_id, 0, 100, f"Computing (0/{total_chunks})")
-                        stop_event = threading.Event()
-                        monitor_stop_events.append(stop_event)
-                        monitor_task = asyncio.create_task(
-                            monitor_dask_progress(node_id, dask_obj, progress_callback, execution_id=execution_id, stop_event=stop_event)
-                        )
-                        monitor_tasks.append(monitor_task)
-                        logger.info(f"[{node_id}] Started progress monitoring for {total_chunks} chunks")
+                        # 不在这里启动 queue monitor；Phase 2 会在 submit 后启动
+                        await progress_callback(node_id, -1, 100, f"Ready ({total_chunks} chunks)")
                     else:
                         await progress_callback(node_id, 100, 100, "Done")
                 elif is_lazy:
@@ -612,7 +723,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             logger.info(f"Targets: {output_nodes}")
 
             # ── Phase 1: 并发构建所有 output_nodes 的 lazy graph ─────────────────
-            msg = "Phase 1: Building unified lazy graph"
+            msg = "GraphBuilding..."
             await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
             state_manager.add_log(msg, "info", execution_id=execution_id)
             await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
@@ -634,7 +745,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
             if delayed_sinks:
                 client = dask_service.get_client()
                 if client:
-                    msg = f"Phase 2: Submitting {len(delayed_sinks)} sink(s) to scheduler (unified graph)"
+                    msg = f"Submitted ({len(delayed_sinks)} sink(s)) — Computing..."
                     await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
                     state_manager.add_log(msg, "info", execution_id=execution_id)
 
@@ -642,46 +753,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     sink_node_ids = [nid for nid, _ in delayed_sinks]
                     sink_delayed_objs = [d for _, d in delayed_sinks]
 
-                    sink_monitor_tasks = []
-                    for nid, _ in delayed_sinks:
-                        node_data = graph.get(nid)
-                        class_name = node_data.get("type") if node_data else None
-                        NodeCls = NODE_CLASS_MAPPINGS.get(class_name) if class_name else None
-                        progress_type = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY) if NodeCls else ProgressType.STATE_ONLY
-
-                        progress_meta = sink_progress_meta.get(nid)
-                        if progress_type == ProgressType.CHUNK_COUNT and progress_meta and progress_meta.get("kind") == "queue":
-                            total_chunks = int(progress_meta.get("total_chunks", 0) or 0)
-                            if total_chunks > 0:
-                                q_name = get_progress_queue_name(nid, execution_id)
-                                used_progress_queues.add(q_name)
-                                await progress_callback(nid, 0, 100, f"Computing (0/{total_chunks})")
-                                stop_event = threading.Event()
-                                monitor_stop_events.append(stop_event)
-                                mt = asyncio.create_task(
-                                    monitor_queue_progress(nid, total_chunks, progress_callback, execution_id=execution_id, stop_event=stop_event)
-                                )
-                                sink_monitor_tasks.append(mt)
-                                monitor_tasks.append(mt)
-                            else:
-                                await progress_callback(nid, -1, 100, "Writing...")
-                        elif progress_type == ProgressType.STAGE_BASED and progress_meta and progress_meta.get("kind") == "stage_queue":
-                            await progress_callback(nid, -1, 100, "Queued...")
-                            q_name = get_stage_progress_queue_name(nid, execution_id)
-                            used_progress_queues.add(q_name)
-                            stop_event = threading.Event()
-                            monitor_stop_events.append(stop_event)
-                            mt = asyncio.create_task(
-                                monitor_stage_progress(nid, progress_callback, execution_id=execution_id, stop_event=stop_event)
-                            )
-                            sink_monitor_tasks.append(mt)
-                            monitor_tasks.append(mt)
-                        else:
-                            await progress_callback(nid, -1, 100, "Queued...")
-
-                    # 统一提交：scheduler 拿到一张覆盖所有 sink 的大图
-                    # 注意：client.compute() 是同步阻塞调用，需要放在线程池执行，
-                    # 否则会阻塞 asyncio 事件循环，导致 WebSocket idle timeout 无法检测
+                    # 1. 先 submit 到 scheduler（确保"Computing"文案在任务已在调度后才出现）
                     futures = await loop.run_in_executor(
                         None, lambda: client.compute(sink_delayed_objs)
                     )
@@ -689,7 +761,69 @@ async def execute_graph(graph: dict, execution_id: str = None):
                         futures = [futures]
                     sink_futures.extend(futures)
 
-                    # 等待所有 sink 完成
+                    # 2. 启动所有 CHUNK_COUNT 节点的 queue monitor（包括 sink 和中间节点）
+                    #    中间节点：发 submitted 广播 → 启动 monitor → monitor 会更新为 running/done
+                    #    sink 节点：发 submitted 广播 → 启动 monitor → monitor 会更新为 running/done
+                    sink_node_set = {n for n, _ in delayed_sinks}
+                    all_monitor_tasks = []
+
+                    for nid, node_data in graph.items():
+                        class_name = node_data.get("type")
+                        NodeCls = NODE_CLASS_MAPPINGS.get(class_name) if class_name else None
+                        if NodeCls is None:
+                            continue
+                        pt = getattr(NodeCls, "PROGRESS_TYPE", ProgressType.STATE_ONLY)
+                        if pt != ProgressType.CHUNK_COUNT:
+                            continue
+
+                        # 获取 total_chunks（sink 从 sink_progress_meta，中间从 node_dask_objs）
+                        progress_meta = sink_progress_meta.get(nid)
+                        total_chunks = 0
+                        if progress_meta and progress_meta.get("kind") == "queue":
+                            total_chunks = int(progress_meta.get("total_chunks", 0) or 0)
+                        elif nid in node_dask_objs:
+                            total_chunks = getattr(node_dask_objs[nid], "npartitions", 0)
+
+                        # waiting_for：对于 sink 节点，显示它在上游等哪个 CHUNK_COUNT 节点
+                        waiting_for = None
+                        if nid in sink_node_set:
+                            upstream_heavy = _find_upstream_chunk_count_nodes(graph, nid)
+                            if upstream_heavy:
+                                # 格式化：对用户友好 — 显示 display_name 列表
+                                waiting_for = [u["display_name"] for u in upstream_heavy]
+
+                        # 向所有 CHUNK_COUNT 节点广播 submitted（中间+sink 统一）
+                        dev = getattr(NodeCls, "DEVICE_HINT", None)
+                        broadcast_msg = {
+                            "type": "progress",
+                            "taskId": nid,
+                            "executionId": execution_id,
+                            "progressType": pt.value,
+                            "progress": 0,
+                            "message": "Submitted",
+                            "runState": "submitted",
+                        }
+                        if dev:
+                            broadcast_msg["device"] = dev
+                        if waiting_for:
+                            broadcast_msg["waitingFor"] = waiting_for
+                        await state_manager.broadcast(execution_id, broadcast_msg)
+
+                        if total_chunks > 0:
+                            q_name = get_progress_queue_name(nid, execution_id)
+                            used_progress_queues.add(q_name)
+                            stop_event = threading.Event()
+                            monitor_stop_events.append(stop_event)
+                            mt = asyncio.create_task(
+                                monitor_queue_progress(nid, total_chunks, progress_callback, execution_id=execution_id, stop_event=stop_event)
+                            )
+                            all_monitor_tasks.append(mt)
+                            monitor_tasks.append(mt)
+                        else:
+                            # 无 chunk 的 CHUNK_COUNT 节点直接标记 running → done
+                            await progress_callback(nid, 0, 100, "Running", run_state="running")
+
+                    # 3. 等待所有 sink 完成（dist_wait 会等待整个 unified graph，含中间节点任务）
                     await loop.run_in_executor(None, lambda: dist_wait(futures))
 
                     # 收集真实结果，回写到 results，便于后续判定成功/失败
@@ -715,20 +849,20 @@ async def execute_graph(graph: dict, execution_id: str = None):
                             sink_runtime_results[nid] = f"Error: {e}"
                             raise
 
-                    # 等待进度监控任务
-                    if sink_monitor_tasks:
+                    # 等待所有 queue monitor 任务 drain 完成
+                    if all_monitor_tasks:
                         try:
                             await asyncio.wait_for(
-                                asyncio.gather(*sink_monitor_tasks, return_exceptions=True),
+                                asyncio.gather(*all_monitor_tasks, return_exceptions=True),
                                 timeout=120
                             )
                         except asyncio.TimeoutError:
-                            logger.warning("[Phase2] Sink progress monitor timeout, continuing")
-                            for mt in sink_monitor_tasks:
+                            logger.warning("[Phase2] Queue monitor timeout, continuing")
+                            for mt in all_monitor_tasks:
                                 if not mt.done():
                                     mt.cancel()
 
-                    # 标记所有 sink 为完成
+                    # 标记所有 sink 为完成（queue monitor 已发 final Done，stage monitor 需要补发）
                     for nid, _ in delayed_sinks:
                         node_data = graph.get(nid)
                         class_name = node_data.get("type") if node_data else None
@@ -743,9 +877,11 @@ async def execute_graph(graph: dict, execution_id: str = None):
                                     result_msg = item
                                     break
                         if result_msg.startswith("Error:"):
-                            await progress_callback(nid, 0, 100, result_msg)
+                            await progress_callback(nid, 0, 100, result_msg, run_state="failed")
                         else:
-                            await progress_callback(nid, 100, 100, "Done")
+                            # queue monitor final 消息会自动发 Done；stage monitor 需要显式补发
+                            if progress_type == ProgressType.STAGE_BASED:
+                                await progress_callback(nid, 100, 100, "Done", run_state="done")
 
                     logger.info("[Phase2] All sinks completed")
                 else:
@@ -756,13 +892,13 @@ async def execute_graph(graph: dict, execution_id: str = None):
             # 统一终态消息：成功
             state_manager.set_execution_status(execution_id, ExecutionStatus.SUCCEEDED)
             await state_manager.broadcast(execution_id, {
-                "type": "execution_finished",
+                "type": "execution_finished",   # <-- 唯一权威终态事件
                 "executionId": execution_id,
                 "status": "succeeded",
                 "message": "Workflow Finished Successfully"
             })
             state_manager.add_log("Workflow Finished Successfully", "success", execution_id=execution_id)
-            # 兼容旧前端：同时发送 done 消息
+            # LEGACY COMPATIBILITY: done 事件，仅供旧前端使用，不应作为终态收口依据
             await state_manager.broadcast(execution_id, {
                 "type": "done",
                 "executionId": execution_id,
@@ -781,12 +917,12 @@ async def execute_graph(graph: dict, execution_id: str = None):
         # 取消路径：统一终态消息
         state_manager.set_execution_status(execution_id, ExecutionStatus.CANCELLED)
         await state_manager.broadcast(execution_id, {
-            "type": "execution_finished",
+            "type": "execution_finished",   # <-- 唯一权威终态事件
             "executionId": execution_id,
             "status": "cancelled",
             "message": "Execution Cancelled"
         })
-        # 兼容旧前端
+        # LEGACY COMPATIBILITY: error 事件，仅供旧前端使用
         await state_manager.broadcast(execution_id, {
             "type": "error",
             "executionId": execution_id,
@@ -804,11 +940,12 @@ async def execute_graph(graph: dict, execution_id: str = None):
             logger.warning(f"Exception during CANCELLING, finalizing as CANCELLED: {e}")
             state_manager.set_execution_status(execution_id, ExecutionStatus.CANCELLED)
             await state_manager.broadcast(execution_id, {
-                "type": "execution_finished",
+                "type": "execution_finished",   # <-- 唯一权威终态事件
                 "executionId": execution_id,
                 "status": "cancelled",
                 "message": f"Execution Cancelled (error during shutdown: {type(e).__name__})"
             })
+            # LEGACY COMPATIBILITY: error 事件
             await state_manager.broadcast(execution_id, {
                 "type": "error",
                 "executionId": execution_id,
@@ -819,13 +956,13 @@ async def execute_graph(graph: dict, execution_id: str = None):
             # 真正的失败路径
             state_manager.set_execution_status(execution_id, ExecutionStatus.FAILED)
             await state_manager.broadcast(execution_id, {
-                "type": "execution_finished",
+                "type": "execution_finished",   # <-- 唯一权威终态事件
                 "executionId": execution_id,
                 "status": "failed",
                 "message": str(e)
             })
             state_manager.add_log(f"Global Error: {str(e)}", "error", execution_id=execution_id)
-            # 兼容旧前端
+            # LEGACY COMPATIBILITY: error 事件
             await state_manager.broadcast(execution_id, {
                 "type": "error",
                 "executionId": execution_id,

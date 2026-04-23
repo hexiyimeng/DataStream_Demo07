@@ -27,20 +27,20 @@ const ZoomOutIcon = () => <svg className="w-4 h-4" fill="none" viewBox="0 0 24 2
 function BottomToolbar() {
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const { zoom } = useViewport();
-  const [showMap, setShowMap] = useState(true);
+  const [showMap, setShowMap] = useState(false);
   return (
     <div className="flex flex-col items-end gap-2 pointer-events-auto">
-      <div className={`transition-all duration-300 origin-bottom-right overflow-hidden rounded-lg shadow-2xl border border-[var(--node-border)] bg-[var(--bg-canvas)] ${showMap ? 'w-52 h-36 opacity-100 mb-1' : 'w-0 h-0 opacity-0'}`}>
+      <div className={`transition-all duration-300 origin-bottom-right overflow-hidden rounded border border-[var(--node-border)] bg-[var(--bg-canvas)] ${showMap ? 'w-52 h-36 opacity-100 mb-1' : 'w-0 h-0 opacity-0'}`}>
         <MiniMap className="!relative !m-0 !w-full !h-full !bg-transparent" nodeColor="#3b82f6" maskColor="rgba(0, 0, 0, 0.3)" zoomable pannable />
       </div>
-      <div className="flex items-center p-1 gap-1 rounded-lg bg-[var(--node-header)] border border-[var(--node-border)] shadow-xl">
-        <button onClick={() => setShowMap(!showMap)} className={`p-2 rounded hover:bg-[var(--widget-hover)] transition-colors ${showMap ? 'text-blue-500' : 'text-[var(--text-sub)]'}`}><MapIcon /></button>
-        <div className="w-[1px] h-4 bg-[var(--node-border)] mx-0.5"></div>
-        <button onClick={() => zoomOut()} className="p-2 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><ZoomOutIcon /></button>
-        <span className="text-[10px] font-mono font-medium text-[var(--text-sub)] min-w-[3rem] text-center cursor-pointer hover:text-[var(--text-head)] select-none" onClick={() => fitView({ duration: 500 })}>{(zoom * 100).toFixed(0)}%</span>
-        <button onClick={() => zoomIn()} className="p-2 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><ZoomInIcon /></button>
-        <div className="w-[1px] h-4 bg-[var(--node-border)] mx-0.5"></div>
-        <button onClick={() => fitView({ duration: 500 })} className="p-2 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><FitIcon /></button>
+      <div className="flex items-center p-0.5 gap-0.5 rounded bg-[var(--node-header)] border border-[var(--node-border)] shadow-sm opacity-70 hover:opacity-100 transition-opacity">
+        <button onClick={() => setShowMap(!showMap)} className={`p-1.5 rounded hover:bg-[var(--widget-hover)] transition-colors ${showMap ? 'text-blue-500' : 'text-[var(--text-sub)]'}`}><MapIcon /></button>
+        <div className="w-[1px] h-3 bg-[var(--node-border)] mx-0.5"></div>
+        <button onClick={() => zoomOut()} className="p-1.5 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><ZoomOutIcon /></button>
+        <span className="text-[10px] font-mono font-medium text-[var(--text-sub)] min-w-[2.5rem] text-center cursor-pointer hover:text-[var(--text-head)] select-none" onClick={() => fitView({ duration: 300 })}>{(zoom * 100).toFixed(0)}%</span>
+        <button onClick={() => zoomIn()} className="p-1.5 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><ZoomInIcon /></button>
+        <div className="w-[1px] h-3 bg-[var(--node-border)] mx-0.5"></div>
+        <button onClick={() => fitView({ duration: 300 })} className="p-1.5 text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-hover)] rounded transition-colors"><FitIcon /></button>
       </div>
     </div>
   );
@@ -135,7 +135,7 @@ export default function FlowEditor() {
         nodeTypes={nodeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
         connectionMode={ConnectionMode.Loose}
-        defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
+        defaultViewport={{ x: 0, y: 0, zoom: 1.0 }}
         isValidConnection={isValidConnection}
         connectionLineStyle={connectionLineStyle}
         selectNodesOnDrag={false}

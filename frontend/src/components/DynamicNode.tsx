@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { Handle, Position, NodeResizer, type NodeProps, type Node } from '@xyflow/react';
-import type { NodeData } from '../types';
+import type { NodeData, RunState, ProgressRole } from '../types';
 import { useFlow } from '../hooks/useFlowContext';
 import { createPortal } from 'react-dom';
 
@@ -66,12 +66,12 @@ const FallbackWidget = ({ name, value, type, onChange }: FallbackWidgetProps) =>
   return (
     <div className="nodrag group flex flex-col bg-[var(--widget-bg)]/50 rounded-sm px-1.5 py-1 mb-[3px] border border-yellow-500/30">
       <div className="flex justify-between items-center mb-0.5">
-        <span className="text-[9px] text-[var(--text-label)] font-semibold select-none truncate" title={name}>{name}</span>
-        <span className="text-[8px] text-yellow-500 font-mono px-1 bg-yellow-500/10 rounded">UNKNOWN: {type}</span>
+        <span className="text-[11px] text-[var(--text-label)] font-semibold select-none truncate" title={name}>{name}</span>
+        <span className="text-[9px] text-yellow-500 font-mono px-1 bg-yellow-500/10 rounded">UNKNOWN: {type}</span>
       </div>
       <div className="bg-[var(--widget-inner)] rounded-sm px-1 flex items-center min-w-0 border border-[var(--node-border)] focus-within:border-yellow-500/50 transition-colors">
         <input
-          className="bg-transparent text-[10px] text-[var(--text-val)] outline-none font-mono w-full py-0.5 border-none focus:ring-0 placeholder-gray-500/30"
+          className="bg-transparent text-[11px] text-[var(--text-val)] outline-none font-mono w-full py-0.5 border-none focus:ring-0 placeholder-gray-500/30"
           value={displayValue}
           onChange={(e) => onChange(name, e.target.value)}
           placeholder="Raw value override..."
@@ -103,10 +103,10 @@ const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) =>
   const containerRef = useRef<HTMLDivElement>(null);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
 
-  const containerClass = "nodrag group flex items-center justify-between bg-[var(--widget-bg)] hover:bg-[var(--widget-hover)] rounded-sm px-1.5 h-6 mb-[3px] transition-colors border border-transparent hover:border-[var(--node-border)] select-none";
-  const labelClass = "text-[10px] text-[var(--text-label)] font-semibold mr-2 shrink-0 tracking-tight max-w-[50%] truncate cursor-default";
-  const inputBgClass = "bg-[var(--widget-inner)] rounded-sm px-1 h-4 flex items-center min-w-0";
-  const inputClass = "bg-transparent text-[10px] text-[var(--text-val)] text-right outline-none font-mono w-full h-full border-none focus:ring-0 p-0 leading-none truncate cursor-pointer";
+  const containerClass = "nodrag group flex items-center justify-between bg-[var(--widget-bg)] hover:bg-[var(--widget-hover)] rounded-sm px-1.5 h-7 mb-[3px] transition-colors border border-transparent hover:border-[var(--node-border)] select-none";
+  const labelClass = "text-[11px] text-[var(--text-label)] font-semibold mr-2 shrink-0 tracking-tight max-w-[50%] truncate cursor-default";
+  const inputBgClass = "bg-[var(--widget-inner)] rounded-sm px-1 h-5 flex items-center min-w-0";
+  const inputClass = "bg-transparent text-[11px] text-[var(--text-val)] text-right outline-none font-mono w-full h-full border-none focus:ring-0 p-0 leading-none truncate cursor-pointer";
 
   const handlePopupOpen = () => { if (containerRef.current) { setAnchorRect(containerRef.current.getBoundingClientRect()); } setShowPopup(true); };
 
@@ -236,10 +236,47 @@ const ControlWidget = ({ name, config, value, onChange }: ControlWidgetProps) =>
 // 5. 核心节点组件：DynamicNode
 // ==========================================
 const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
-  const { nodeSpec, values = {}, progress, message, _invalid, _warning } = data || {};
+  const { nodeSpec, values = {}, progress, message, _invalid, _warning, runState, progressRole, waitingFor, device } = data || {};
 
   // 获取节点的进度报告类型
   const progressType = nodeSpec?.progress_type || 'state_only';
+
+  // === 计算节点状态 ===
+  const progressValue = progress ?? 0;
+
+  // 状态指示灯颜色
+  type NodeStatus = 'idle' | 'ready' | 'submitted' | 'running' | 'done' | 'failed' | 'cancelled' | 'error';
+  const status: NodeStatus = runState ?? 'idle';
+
+  const statusColor = {
+    idle: 'bg-[#444]',
+    ready: 'bg-blue-400',
+    submitted: 'bg-blue-400',
+    running: 'bg-yellow-400',
+    done: 'bg-green-500',
+    failed: 'bg-red-500',
+    cancelled: 'bg-gray-400',
+    error: 'bg-red-500',
+  }[status] ?? 'bg-[#444]';
+
+  // 底部状态文案
+  const footerMessage = useMemo(() => {
+    if (status === 'submitted') return 'Submitted';
+    if (status === 'running' && waitingFor && waitingFor.length > 0) {
+      return `Waiting for ${waitingFor[0]}${waitingFor.length > 1 ? ` +${waitingFor.length - 1}` : ''}`;
+    }
+    if (status === 'running' && progress !== null) {
+      return message || 'Running...';
+    }
+    if (status === 'done') return 'Done';
+    if (status === 'failed') return message || 'Failed';
+    if (status === 'cancelled') return 'Cancelled';
+    if (status === 'error') return message || 'Error';
+    if (progressType === 'chunk_count' && progressValue > 0) {
+      return message || 'Running...';
+    }
+    return message || '';
+  }, [status, waitingFor, progress, message, progressType, progressValue]);
 
   const { updateNodeData} = useFlow();
   const [collapsed, setCollapsed] = useState(false);
@@ -289,29 +326,12 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
 
   // 根据新的进度协议判断节点状态
   // progress 为 null 表示 state_only（无百分比进度）
-  const progressValue = progress ?? 0;
   const isRunning = progressValue > 0 && progressValue < 100;
   const isIndeterminate = progress === null || progress === -1;
   const isComplete = progressValue === 100;
   const isError = message?.toLowerCase().includes('error');
   // 只为 chunk_count 类型的节点显示百分比
   const showPercentage = progressType === 'chunk_count' && progress !== null;
-
-  // 调试日志
-  useEffect(() => {
-    console.log(`[DynamicNode] ${nodeSpec?.display_name || 'Unknown'}:`, {
-      progress,
-      progressType,
-      showPercentage,
-      message,
-      isRunning,
-      isComplete,
-      isIndeterminate,
-      'shouldShowFooter': !collapsed && (isRunning || isIndeterminate || message),
-      'shouldShowProgressBar': showPercentage && (isRunning || isIndeterminate),
-      'shouldShowPercentage': showPercentage && (isRunning || isComplete)
-    });
-  }, [progress, progressType, showPercentage, message, nodeSpec, isRunning, isComplete, isIndeterminate, collapsed]);
 
   return (
     <>
@@ -320,20 +340,20 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
       <div className={`node-wrapper relative rounded-[4px] shadow-md bg-[var(--node-body)] transition-all group flex flex-col
           ${selected ? 'border-[#eee] ring-1 ring-[#eee]/30' : 'border-[var(--node-border)]'}
           ${_invalid ? 'border-orange-500 ring-2 ring-orange-500/50' : ''}
-          ${isError ? 'border-red-500 shadow-red-500/30' : 'border'}`}
+          ${status === 'failed' || status === 'error' ? 'border-red-500 shadow-red-500/30' : ''}`}
       >
         {/* Header (始终显示) */}
         <div
-          className={`relative h-6 px-2 flex items-center justify-between bg-[var(--node-header)] border-b border-[var(--node-border)] z-10 rounded-t-[4px] shrink-0 cursor-pointer select-none
+          className={`relative h-7 px-2 flex items-center justify-between bg-[var(--node-header)] border-b border-[var(--node-border)] z-10 rounded-t-[4px] shrink-0 cursor-pointer select-none
             ${_invalid ? 'bg-orange-900/20' : ''}`}
           onDoubleClick={(e) => { e.stopPropagation(); setCollapsed(!collapsed); }}
         >
-           <span className={`text-[11px] font-bold ${_invalid ? 'text-orange-500' : 'text-[var(--text-head)]'} truncate mr-2`}>
+           <span className={`text-[13px] font-bold ${_invalid ? 'text-orange-500' : 'text-[var(--text-head)]'} truncate mr-2`}>
              {nodeSpec?.display_name || data.opType || 'Unknown'}
            </span>
-           <div className="flex items-center gap-1.5">
+             <div className="flex items-center gap-1.5">
              {_invalid && <span className="text-[10px] text-orange-500 font-bold">⚠️</span>}
-             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors ${_invalid ? 'bg-orange-500' : isError ? 'bg-red-500' : isComplete ? 'bg-green-500' : (isRunning || isIndeterminate) ? 'bg-yellow-400' : 'bg-[#444]'}`} />
+             <div className={`w-1.5 h-1.5 rounded-full shadow-sm transition-colors ${_invalid ? 'bg-orange-500' : statusColor}`} />
            </div>
         </div>
 
@@ -354,20 +374,20 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
                   {/* Inputs */}
                   <div className="flex flex-col gap-1.5 flex-1 min-w-0">
                     {linkInputs.map((input) => (
-                      <div key={input.name} className="relative h-3.5 flex items-center pl-2">
+                      <div key={input.name} className="relative h-5 flex items-center pl-2">
                         <Handle type="target" position={Position.Left} id={input.name}
                                 className="!w-2.5 !h-2.5 z-50"
                                 style={{ backgroundColor: input.color, left: '-13px' }}
                         />
-                        <span className="text-[10px] text-[var(--text-label)] truncate">{input.name}</span>
+                        <span className="text-[12px] text-[var(--text-label)] truncate">{input.name}</span>
                       </div>
                     ))}
                   </div>
                   {/* Outputs */}
                   <div className="flex flex-col gap-1.5 items-end flex-1 min-w-0">
                     {outputs.map((output, i) => (
-                      <div key={i} className="relative h-3.5 flex items-center justify-end pr-2">
-                        <span className="text-[10px] text-[var(--text-label)] truncate uppercase">{output.name}</span>
+                      <div key={i} className="relative h-5 flex items-center justify-end pr-2">
+                        <span className="text-[12px] text-[var(--text-label)] truncate uppercase">{output.name}</span>
                         <Handle type="source" position={Position.Right} id={`${i}`}
                                 className="!w-2.5 !h-2.5 z-50"
                                 style={{ backgroundColor: output.color, right: '-13px' }}
@@ -391,8 +411,8 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
            </div>
         </div>
 
-        {/* Footer (进度条) - 根据 progress_type 显示不同的 UI */}
-        {(!collapsed && (isRunning || isIndeterminate || message)) && (
+        {/* Footer (进度条) - 根据 runState/progressType 显示不同的 UI */}
+        {(!collapsed && (status !== 'idle' && status !== 'ready')) && (
           <div className="relative mt-auto">
              {/* 只为 chunk_count 类型的节点显示进度条 */}
              {showPercentage && (
@@ -400,9 +420,9 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
                    <div className="h-full bg-green-500 transition-all duration-300" style={{ width: `${progressValue}%` }} />
                </div>
              )}
-             <div className={`px-2 py-1 flex justify-between text-[9px] font-mono border-t border-[var(--node-border)] bg-[var(--node-body)] text-[var(--text-sub)] ${!showPercentage ? 'text-center' : ''}`}>
-                <span className={`truncate ${!showPercentage ? 'mx-auto' : 'max-w-[80%]'}`}>{message || "Running..."}</span>
-                {showPercentage && (isRunning || isComplete) && <span>{Math.floor(progressValue)}%</span>}
+             <div className={`px-2 py-1 flex justify-between text-[10px] font-mono border-t border-[var(--node-border)] bg-[var(--node-body)] text-[var(--text-sub)] ${!showPercentage ? 'text-center' : ''}`}>
+                <span className={`truncate ${!showPercentage ? 'mx-auto' : 'max-w-[80%]'}`}>{footerMessage || message || 'Running...'}</span>
+                {showPercentage && status === 'running' && <span>{Math.floor(progressValue)}%</span>}
              </div>
           </div>
         )}

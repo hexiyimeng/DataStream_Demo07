@@ -6,6 +6,7 @@ import platform
 import torch
 
 logger = logging.getLogger("BrainFlow.Config")
+os.environ.setdefault("CELLPOSE_LOCAL_MODELS_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "models"))
 
 
 def _get_system_memory_gb():

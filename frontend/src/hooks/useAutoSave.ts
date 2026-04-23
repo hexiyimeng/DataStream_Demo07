@@ -16,18 +16,28 @@ export const useAutoSave = (
       try {
         const parsed = JSON.parse(savedData);
 
-        // A. 恢复节点，但强制重置运行状态
+        // A. 恢复节点，但强制重置运行状态（清理所有运行时字段）
         if (parsed.nodes && Array.isArray(parsed.nodes)) {
           const cleanNodes = parsed.nodes.map((n: Node<NodeData>) => ({
             ...n,
-            // 强制覆盖 data 中的运行时状态
+            // 移除可能残留的呼吸灯样式类名
+            className: n.className ? n.className.replace('node-running-pulse', '').trim() : '',
+            // 强制覆盖 data 中的所有运行时状态
             data: {
               ...n.data,
-              progress: 0,       // 进度归零
-              message: '',       // 消息清空
-            },
-            // 移除可能残留的呼吸灯样式类名
-            className: n.className ? n.className.replace('node-running-pulse', '').trim() : ''
+              progress: 0,
+              message: '',
+              runState: undefined,
+              progressRole: undefined,
+              waitingFor: undefined,
+              device: undefined,
+              totalChunks: undefined,
+              processedChunks: undefined,
+              completedInferenceChunks: undefined,
+              skippedChunks: undefined,
+              failedChunks: undefined,
+              executionId: undefined,
+            }
           }));
           setNodes(cleanNodes);
         }

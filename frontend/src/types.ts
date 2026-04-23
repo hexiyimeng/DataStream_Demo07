@@ -3,6 +3,56 @@ import type { Node, Edge } from '@xyflow/react';
 // === 进度类型 ===
 export type ProgressType = 'chunk_count' | 'state_only' | 'stage_based';
 
+// === 执行时状态 (runState) ===
+export type RunState = 'ready' | 'submitted' | 'running' | 'done' | 'failed' | 'cancelled';
+
+// === 节点进度角色 (progressRole) ===
+export type ProgressRole = 'chunk_sink' | 'chunk_intermediate' | 'stage_sink' | 'state_only';
+
+// === Execution 全局阶段 ===
+export type ExecutionPhase =
+  | 'idle'
+  | 'graph_building'
+  | 'submitted'
+  | 'running'
+  | 'cancelling'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+// === WebSocket 连接状态 ===
+export type WebSocketStatus = 'connected' | 'reconnecting' | 'disconnected';
+
+// === 节点运行时数据 (NodeData 的运行时扩展) ===
+export interface NodeRuntimeData {
+  runState?: RunState;
+  progressRole?: ProgressRole;
+  waitingFor?: string[];
+  device?: string;
+  totalChunks?: number;
+  processedChunks?: number;
+  completedInferenceChunks?: number;
+  skippedChunks?: number;
+  failedChunks?: number;
+  executionId?: string | null;
+}
+
+// === Execution 全局运行时状态 ===
+export interface ExecutionRuntimeState {
+  phase: ExecutionPhase;
+  executionId: string | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  totalNodes: number;
+  lastError: string | null;
+  // 汇总的 chunk 统计（来自所有 CHUNK_COUNT 节点）
+  totalChunks: number;
+  processedChunks: number;
+  completedInferenceChunks: number;
+  skippedChunks: number;
+  failedChunks: number;
+}
+
 // === 基础配置 ===
 export interface NodeInputConfig {
   [key: string]: [string, Record<string, unknown>?];
@@ -10,7 +60,7 @@ export interface NodeInputConfig {
 
 // === 节点的规格 (Node Specification) ===
 export interface NodeSpec {
-  type: string;  // 节点类型标识 (如 "LoadImage") - 后端返回 "name" 和 "type" 都有
+  type: string;  // 节点类型标识 (如 "LoadImage")
   name?: string;  // 后端也返回此字段，与 type 相同
   display_name: string; // 显示名称 (如 "Load Image")
   category: string; // 分类目录 (如 "image/loaders")
@@ -29,22 +79,67 @@ export interface NodeData extends Record<string, unknown> {
   values: Record<string, unknown>; // 用户填写的参数值
   progress: number;  // 运行进度 (0-100)
   message?: string;  // 运行状态消息 (如 "Loading...")
+  // --- 运行时状态字段 ---
+  runState?: RunState;
+  progressRole?: ProgressRole;
+  waitingFor?: string[];
+  device?: string;
+  totalChunks?: number;
+  processedChunks?: number;
+  completedInferenceChunks?: number;
+  skippedChunks?: number;
+  failedChunks?: number;
+  executionId?: string | null;
   // 可选：用于直接更新值的辅助函数
   updateValue?: (id: string, key: string, val: unknown) => void;
   // 可选：节点失效标记
-  _invalid?: boolean; // 节点是否失效（后端已删除）
-  _warning?: string;  // 失效警告消息
+  _invalid?: boolean;
+  _warning?: string;
 }
 
 // === WebSocket 消息结构 ===
+// execution_finished 是唯一权威终态事件
+// done / error 仅作为 legacy compatibility，不再作为终态收口依据
+export type WSMessageType =
+  | 'log'
+  | 'success'
+  | 'warning'
+  | 'progress'
+  | 'error'           // legacy compatibility
+  | 'done'            // legacy compatibility
+  | 'executed'
+  | 'execution_started'
+  | 'execution_finished'   // 唯一权威终态事件
+  | 'subscribed'
+  | 'ping'
+  | 'pong'
+  | 'execution_snapshot';   // 重连恢复时后端发送的全量状态快照
+
 export interface WSMessage {
-  type: 'log' | 'success' | 'warning' | 'progress' | 'error' | 'done' | 'executed' | 'execution_started' | 'subscribed';
+  type: WSMessageType;
   message?: string;
-  taskId?: string; // 对应节点的 ID
-  progress?: number | null; // 百分比进度 (0-100)，state_only 时为 null
-  progressType?: ProgressType; // 进度类型：chunk_count / state_only / stage_based
+  taskId?: string;
+  progress?: number | null;
+  progressType?: ProgressType;
   executionId?: string;
-  status?: 'running' | 'failed' | 'cancelled'; // execution_finished 的状态
+
+  // --- progress 消息的完整字段 ---
+  runState?: RunState;
+  progressRole?: ProgressRole;
+  waitingFor?: string[];
+  device?: string;
+  totalChunks?: number;
+  processedChunks?: number;
+  completedInferenceChunks?: number;
+  skippedChunks?: number;
+  failedChunks?: number;
+
+  // --- execution_finished / execution_snapshot ---
+  status?: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  createdAt?: number;
+  finishedAt?: number;
+  nodeCount?: number;
+  logCount?: number;
 }
 
 // === 工作流 (Workflow) ===

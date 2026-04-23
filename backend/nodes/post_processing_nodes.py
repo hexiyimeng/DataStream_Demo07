@@ -5,22 +5,16 @@ import dask
 import numpy as np
 import pandas as pd
 from core.registry import register_node, ProgressType
-from core.state_manager import state_manager
 from utils.progress_helper import report_stage_progress
 from utils.union_find import UnionFind
+from utils.chunk_helpers import _build_chunk_adjacency
 
 logger = logging.getLogger("BrainFlow.PostProcessing")
-
-try:
-    import dask_image.ndmeasure
-    HAS_DASK_IMAGE = True
-except ImportError:
-    HAS_DASK_IMAGE = False
 
 
 # =============================================================================
 # DaskLabelStitcher (DEPRECATED)
-# =============================================================================
+#=============================================================================
 
 @register_node("DaskLabelStitcher")
 class DaskLabelStitcher:
@@ -58,36 +52,6 @@ class DaskLabelStitcher:
 # =============================================================================
 # Helper functions for new DaskStats (instance-table-based)
 # =============================================================================
-
-def _build_chunk_adjacency(numblocks):
-    """
-    Build chunk adjacency list from numblocks tuple.
-
-    Returns
-    -------
-    adjacency_edges : list of (chunk_id_a, chunk_id_b) tuples
-        All adjacent chunk pairs (each pair appears once)
-    chunk_index_map : dict mapping chunk_id -> block_idx tuple
-    """
-    chunk_index_map = {}
-    for block_idx in np.ndindex(numblocks):
-        chunk_id = '_'.join(str(i) for i in block_idx)
-        chunk_index_map[chunk_id] = block_idx
-
-    adjacency_edges = set()
-    for chunk_id, block_idx in chunk_index_map.items():
-        for axis in range(len(block_idx)):
-            # Positive direction neighbor
-            if block_idx[axis] < numblocks[axis] - 1:
-                neighbor_idx = list(block_idx)
-                neighbor_idx[axis] += 1
-                neighbor_id = '_'.join(str(i) for i in neighbor_idx)
-                # Store canonical pair (smaller id first)
-                pair = (chunk_id, neighbor_id) if chunk_id < neighbor_id else (neighbor_id, chunk_id)
-                adjacency_edges.add(pair)
-
-    return list(adjacency_edges), chunk_index_map
-
 
 def _estimate_diameter(voxel_count):
     """Estimate equivalent spherical diameter from voxel count (assuming cubic voxels)."""
@@ -341,13 +305,24 @@ class DaskStats:
     """
     4-phase distributed instance statistics pipeline.
 
+    扩展瓶颈说明（重要）：
+      - Phase 2 (_flatten_edge_lists → _build_merge_map_from_edges) 是全局收敛点。
+        它的计算量取决于 boundary_edges 数量，而不是 chunk 总数。
+        对于网格状邻接关系：boundary_edges ≈ O(N × D)，其中 N=chunk数，D=维度数。
+        这意味着扩展瓶颈是"有多少跨 chunk 边界对"，而非"数据有多大"。
+      - Phase 4 (_final_reduce) 同样为全局收敛点，但对小表操作，瓶颈通常是 CSV IO。
+      - Phase 1 和 Phase 3 才是完全分布式的（每个邻接对 / 每个 partition 独立）。
+
     Phase 1: Distributed pairwise reconcile — each adjacent chunk pair = one delayed task.
              Filters to touches_boundary=True instances only. Returns small edge lists.
-    Phase 2: Collect all edges → build merge_map via UnionFind on edges only.
+    Phase 2: [GLOBAL BARRIER] Collect all edges → UnionFind on full edge set → merge_map.
+             ⚠️ 这是全局收敛点：必须等待所有 Phase 1 edge_tasks 完成，
+               然后在单节点（或单 worker）上运行 UnionFind。
+             ⚠️ flat_edges_delayed = dask.delayed(_flatten_edge_lists)(tuple(edge_tasks))
+               会将所有 edge_tasks 的结果收集到内存，大图对象压力取决于 boundary_edges 数量。
     Phase 3: Distributed partial aggregation per partition — local groupby with group_key.
-    Phase 4: Final reduce → CSV with integer id.
-
-    Key design: No full combined_df ever materialized. Each phase only sees what it needs.
+    Phase 4: [GLOBAL BARRIER] Tree-reduce partial tables → CSV with integer id.
+             ⚠️ 这是全局收敛点：树状 reduce 在单节点合并所有 partial DataFrame。
     """
     CATEGORY = "BrainFlow/PostProcessing"
     DISPLAY_NAME = "Instance Statistics (Table-based)"
@@ -406,7 +381,21 @@ class DaskStats:
             edge_tasks.append(edge_task)
 
         # ============================================================
-        # Phase 2: Flatten all edge lists → UnionFind → merge_map
+        # Phase 2: [GLOBAL BARRIER] Flatten all edge lists → UnionFind → merge_map
+        #
+        # ⚠️ CRITICAL SCALING CONSTRAINT:
+        #   This step must collect ALL edge lists from Phase 1 before proceeding.
+        #   The number of boundary edges ≈ O(N × D) for a grid adjacency:
+        #     N = total chunk count, D = number of spatial dimensions
+        #   This is NOT proportional to data size, but to chunk count × dimensions.
+        #   For a 10×10×10 chunk grid (1000 chunks) in 3D: ~3000 boundary edges max.
+        #
+        #   Memory pressure: flat_edges_delayed materializes the full edge list.
+        #   If each boundary pair produces ~10 edges (avg), that's ~30k edge dicts — manageable.
+        #   But if boundary instances are many (dense segmentation), edge count grows.
+        #
+        #   Scaling rule: This phase becomes a bottleneck when boundary_edges ≫ 100k,
+        #   not when chunk count or data size grows.
         #
         # Keep the graph fully lazy: wrap flatten in a delayed layer so
         # dask knows edge_tasks must resolve before merge_map can build.
@@ -436,8 +425,14 @@ class DaskStats:
             partial_tasks.append(partial_task)
 
         # ============================================================
-        # Phase 4: Tree-reduce partial tables → CSV
-        # Balanced binary merge tree avoids single-point pd.concat bottleneck.
+        # Phase 4: [GLOBAL BARRIER] Tree-reduce partial tables → CSV
+        #
+        # Balanced binary merge tree: merges happen pairwise on workers first,
+        # then progressively on fewer workers, finally on one node.
+        # The final _final_reduce runs on a single node with the complete DataFrame.
+        #
+        # ⚠️ Bottleneck: Final CSV write is sequential; tree-reduce mitigates
+        # merge bottleneck but the final concat + write is a sequential step.
         # ============================================================
         if execution_id:
             report_stage_progress(node_id, 80, 100, "Phase 4: Final reduce...", execution_id=execution_id)

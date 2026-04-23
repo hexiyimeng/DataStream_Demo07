@@ -31,37 +31,37 @@
   }
 
   .dark {
-    /* ==== 🌙 深色模式 (ComfyUI Style) ==== */
-    --bg-canvas: #202020;
-    --bg-grid-minor: #2a2a2a;
-    --bg-grid-major: #000000;
+    /* ==== 🌙 深色模式 (ComfyUI Style — 低饱和深灰、清晰边界、少发光) ==== */
+    --bg-canvas: #111111;
+    --bg-grid-minor: #1a1a1a;
+    --bg-grid-major: #0a0a0a;
 
-    --node-header: #353535;
-    --node-body: #3b3b3b;
-    --node-border: #2a2a2a;
+    --node-header: #2a2a2a;
+    --node-body: #1e1e1e;
+    --node-border: #3a3a3a;
 
-    --widget-bg: #222;
-    --widget-hover: #333;
+    --widget-bg: #252525;
+    --widget-hover: #303030;
 
-    --text-head: #eee;
-    --text-label: #aaa;
-    --text-val: #fff;
-    --text-sub: #777;
+    --text-head: #cccccc;
+    --text-label: #888888;
+    --text-val: #e0e0e0;
+    --text-sub: #666666;
 
-    --edge-stroke: #777;
+    --edge-stroke: #555555;
 
-    /* 控制台配色 (深色) - 极黑 */
-    --console-bg: #0f0f0f;
-    --console-border: #333333;
-    --console-text: #cccccc;
-    --console-info: #60a5fa;
+    /* 控制台配色 (深色) — 更暗更干净 */
+    --console-bg: #0d0d0d;
+    --console-border: #2a2a2a;
+    --console-text: #bbbbbb;
+    --console-info: #4a9eff;
   }
 }
 
 body {
   background-color: var(--bg-canvas);
   color: var(--text-head);
-  font-family: 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Segoe UI', -apple-system, Roboto, sans-serif;
   overflow: hidden;
   transition: background-color 0.2s;
 }

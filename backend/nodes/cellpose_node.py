@@ -4,7 +4,7 @@ import threading
 import os
 from typing import Dict, Tuple, Optional
 from core.registry import register_node, ProgressType
-from utils.progress_helper import report_progress
+from nodes.base import BaseBlockMapNode
 
 # 初始化日志
 logger = logging.getLogger("BrainFlow.Cellpose")
@@ -53,11 +53,20 @@ class CellposeModelCache:
     """
     线程安全的 Cellpose 模型缓存管理器。
 
+    缓存作用域：worker-level（进程内共享）。
+    - 同一 Dask worker 进程上的多个 execution 共享同一份模型缓存。
+    - ref_count 在同一 worker 跨 execution 累加，不是 per-execution 的。
+    - 这允许跨 execution 模型复用（一个 execution 结束后 ref>0，模型仍留缓存）。
+
     设计原则：
     - 引用计数归零时模型仍保留在缓存（跨 chunk 复用，避免重复加载开销）
     - 不在 release 路径做高频 GPU 同步/清缓存，保持 Dask worker 吞吐
     - 显存泄漏防护由 clear_if_safe() / force_clear() 显式触发，或由
       _do_cuda_cache_cleanup() 低频周期性执行
+
+    清理策略分层：
+    - clear_if_safe(): 仅在"所有 execution 都结束且 ref=0"时清 — runtime 首选
+    - force_clear(): 忽略 refcount，强制清 — 仅用于 cluster stop / shutdown / admin
     """
 
     _instance = None
@@ -317,9 +326,9 @@ class CellposeModelCache:
         if model_path is None:
             model_path = model_type
 
-        logger.debug(f"[CellposeCache] Creating CellPoseModel(pretrained_model={model_type!r}, resolved_path={model_path!r}, gpu={device.type=='cuda'}, device={device})")
+        logger.debug(f"[CellposeCache] Creating CellposeModel(pretrained_model={model_type!r}, resolved_path={model_path!r}, gpu={device.type=='cuda'}, device={device})")
 
-        # ---- 主路径：CellPoseModel(pretrained_model=...) ----
+        # ---- 主路径：CellposeModel(pretrained_model=...) ----
         model = models.CellposeModel(
             gpu=(device.type == "cuda"),
             pretrained_model=model_path,
@@ -346,6 +355,8 @@ class CellposeModelCache:
             )
 
         return model, resolved_type
+
+
 # 全局单例
 _model_cache = CellposeModelCache()
 
@@ -364,186 +375,28 @@ def force_clear_cellpose_model_cache() -> int:
 
 
 # =============================================================================
-# 模块级 segment 函数（Dask 可序列化）
-# =============================================================================
-def _segment_chunk(
-        block,
-        nid=None,
-        execution_id=None,
-        model_type="cyto",
-        diameter=0.0,
-        do_3d=True,
-        anisotropy=1.0,
-        stitch_threshold=0.0,
-        resample=False,
-        flow3D_smooth=0.0,
-        flow_threshold=0.4,
-        cellprob_threshold=0.0,
-        gpu_batch_size=8,
-        tile_bsize=256,
-        tile_overlap=0.1,
-):
-    """
-    Cellpose 分割的 per-chunk 工作函数。
-
-    参数设计原则：
-    - diameter <= 0 时不传给 eval，由模型自动估计（Cellpose v4 / SAM 默认行为）
-    - do_3d=True 时 3D 路径专用参数；False 时非 3D 路径参数生效
-    - 默认不传 channels：Cellpose v4 的 CellposeModel/SAM 风格默认自动检测，
-      显式指定 channels=[0,0] 反而会覆盖自动逻辑
-    - flow_threshold 仅用于非 3D 路径；3D 路径不依赖它
-    """
-    import torch
-
-    # -------------------------------------------------------------------------
-    # Dask metadata probe guard（空块快速返回）
-    # -------------------------------------------------------------------------
-    if block is None:
-        return np.zeros((0,), dtype=np.uint16)
-    if not hasattr(block, "shape"):
-        return np.array((), dtype=np.uint16)
-    if block.size == 0:
-        return np.zeros_like(block, dtype=np.uint16)
-
-    if np.all(block == 0):
-        if nid:
-            report_progress(nid, execution_id=execution_id, chunk_type="skipped")
-        return np.zeros_like(block, dtype=np.uint16)
-
-    # -------------------------------------------------------------------------
-    # 设备选择（兼容多 GPU worker 分配）
-    # -------------------------------------------------------------------------
-    device_str = "cuda:0" if torch.cuda.is_available() else "cpu"
-    try:
-        from distributed import get_worker
-        worker = get_worker()
-        if hasattr(worker, "assigned_gpu"):
-            device_str = worker.assigned_gpu
-    except Exception:
-        # 非 Dask worker 环境（如本地调试），保持默认设备
-        pass
-
-    device_desc = f"{device_str}"
-    logger.debug(f"[Cellpose] Chunk device={device_desc}, shape={block.shape}")
-
-    # -------------------------------------------------------------------------
-    # 模型获取（引用计数 +1）
-    # -------------------------------------------------------------------------
-    model = _model_cache.acquire_model(model_type, device_str)
-
-    # -------------------------------------------------------------------------
-    # 异常安全初始化（finally 依赖这些变量）
-    # -------------------------------------------------------------------------
-    masks = None
-    flows = None
-    styles = None
-
-    try:
-        # ---------------------------------------------------------------------
-        # 构造 eval 参数
-        # ---------------------------------------------------------------------
-        eval_kwargs: dict = {
-            "batch_size": gpu_batch_size,
-            "progress": None,  # 禁用内置进度条（阻塞主线程）
-        }
-
-        # diameter：<= 0 表示让模型自动估计，不传该参数
-        if diameter > 0:
-            eval_kwargs["diameter"] = diameter
-
-        # tile 参数
-        eval_kwargs["bsize"] = tile_bsize
-        eval_kwargs["tile_overlap"] = tile_overlap
-
-        # resample
-        eval_kwargs["resample"] = resample
-
-        # ---------------------------------------------------------------------
-        # 3D vs 非 3D 路径（互斥）
-        # ---------------------------------------------------------------------
-        use_3d = (block.ndim >= 3) and do_3d
-
-        if use_3d:
-            # 3D 专用参数
-            eval_kwargs["do_3D"] = True
-            eval_kwargs["z_axis"] = 0
-
-            # anisotropy：仅当与默认值不同时才传
-            if anisotropy != 1.0:
-                eval_kwargs["anisotropy"] = anisotropy
-
-            # flow3D_smooth：仅当大于 0 时才传
-            if flow3D_smooth > 0:
-                eval_kwargs["flow3D_smooth"] = flow3D_smooth
-
-            # 3D 路径不依赖 flow_threshold
-        else:
-            # 非 3D 路径
-            eval_kwargs["do_3D"] = False
-
-            # stitch_threshold：仅当 > 0 时传（用于 3D stack 的 2D 切片缝合）
-            if stitch_threshold > 0:
-                eval_kwargs["stitch_threshold"] = stitch_threshold
-
-            # flow_threshold：仅在非 3D 路径使用
-            eval_kwargs["flow_threshold"] = flow_threshold
-            eval_kwargs["cellprob_threshold"] = cellprob_threshold
-
-        # -----------------------------------------------------------------
-        # 执行分割
-        # 注意：默认不传 channels，让 Cellpose v4 自动检测（SAM 风格）
-        # 显式 channels=[0,0] 会覆盖自动逻辑，对某些自定义模型不友好
-        # -----------------------------------------------------------------
-        masks, flows, styles = model.eval(block, **eval_kwargs)
-
-        # 真实推理完成，上报进度
-        if nid:
-            report_progress(nid, execution_id=execution_id, chunk_type="completed")
-
-        return masks.astype(np.uint16)
-
-    except Exception as e:
-        logger.error(
-            f"[Cellpose] Worker exception on chunk (shape={block.shape}, "
-            f"device={device_desc}, model={model_type}): {str(e)}"
-        )
-        if nid:
-            report_progress(nid, execution_id=execution_id, chunk_type="failed")
-        return np.zeros_like(block, dtype=np.uint16)
-
-    finally:
-        # 释放模型（减少引用计数；不触发 GPU 同步/清缓存）
-        # 传模型对象本身，由 _resolved_type 属性确定实际 key
-        _model_cache.release_model(model, device_str)
-
-        # 显式删除中间变量，帮助 Python GC 及时回收
-        if masks is not None:
-            del masks
-        if flows is not None:
-            del flows
-        if styles is not None:
-            del styles
-        del block
-
-        # 低频可配置的显存清理（默认关闭，避免每个 chunk 都同步拖慢吞吐）
-        _do_cuda_cache_cleanup()
-
-
-# =============================================================================
-# 节点定义
+# Cellpose 节点
 # =============================================================================
 @register_node("DaskCellpose")
-class DaskCellpose:
+class DaskCellpose(BaseBlockMapNode):
     """
     Cellpose 分布式分割节点：支持大尺度 2D/3D 数据的 Dask 分布式分割。
 
     使用 map_blocks 并行处理每个 chunk，模型在 Dask worker 上按需加载，
     通过引用计数缓存实现跨 chunk 复用。显存治理采用低频可配置策略，
     优先保证 Dask worker 吞吐量。
+
+    本节点继承自 BaseBlockMapNode，框架行为（skip/failure/progress）由 Base 管理。
+    process_block 只包含 Cellpose 分割的核心算法逻辑。
     """
     CATEGORY = "BrainFlow/Segmentation"
     DISPLAY_NAME = "Cellpose Segmentation"
-    PROGRESS_TYPE = ProgressType.CHUNK_COUNT  # 有真实的 chunk 级进度
+
+    # BlockMap 配置
+    OUTPUT_DTYPE = np.uint16
+    SKIP_EMPTY_BLOCKS = True
+    SKIP_ALL_ZERO_BLOCKS = True   # Cellpose 特殊：全零块跳过
+    FAILURE_POLICY = "zeros_like"  # Cellpose 特殊：容错，单块失败不影响其他块
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -562,46 +415,71 @@ class DaskCellpose:
     RETURN_NAMES = ("mask_dask",)
     FUNCTION = "execute"
 
-    def execute(
-            self,
-            dask_arr,
-            model_type="cyto",
-            diameter=0.0,
-            flow_threshold=0.4,
-            cellprob_threshold=0.0,
-            gpu_batch_size=8,
-            **kwargs,
-    ):
-        current_node_id = kwargs.get("_node_id")
-        execution_id = kwargs.get("_execution_id")
+    def process_block(self, block, block_info, params, runtime):
+        """
+        Cellpose 单块分割算法。
 
-        logger.info(
-            f"[Cellpose] Input shape={dask_arr.shape}, chunks={dask_arr.chunks}, "
-            f"model={model_type}, diameter={diameter}"
-        )
+        注意：以下框架逻辑由 BaseBlockMapNode 统一管理，
+        不需要在此处理：
+        - 空块跳过（SKIP_EMPTY_BLOCKS=True）
+        - 全零块跳过（SKIP_ALL_ZERO_BLOCKS=True）
+        - 异常兜底（FAILURE_POLICY="zeros_like"）
+        - progress 上报（completed/skipped/failed）
+        - device_hint 解析（runtime["device_hint"] 已注入）
+        """
+        device_hint = runtime["device_hint"]
 
-        # map_blocks：每个 chunk 调用一次 _segment_chunk，结果合并为新的 dask array
-        # 高级参数（anisotropy / stitch_threshold / resample / flow3D_smooth / tile_bsize / tile_overlap）
-        # 内部固定默认值，不暴露到 UI，保持节点简洁
-        result = dask_arr.map_blocks(
-            _segment_chunk,
-            dtype=np.uint16,
-            meta=np.array((), dtype=np.uint16),
-            nid=current_node_id,
-            execution_id=execution_id,
-            model_type=model_type,
-            diameter=diameter,
-            flow_threshold=flow_threshold,
-            cellprob_threshold=cellprob_threshold,
-            gpu_batch_size=gpu_batch_size,
-            # 内部固定默认值，不从 UI 透传
-            anisotropy=1.0,
-            stitch_threshold=0.0,
-            resample=False,
-            flow3D_smooth=0.0,
-            tile_bsize=256,
-            tile_overlap=0.1,
-            do_3d=True,
-        )
+        # 模型获取（引用计数 +1）
+        model = _model_cache.acquire_model(params["model_type"], device_hint)
 
-        return (result,)
+        masks = None
+        flows = None
+        styles = None
+
+        try:
+            # 构造 eval 参数
+            eval_kwargs: dict = {
+                "batch_size": params["gpu_batch_size"],
+                "progress": None,  # 禁用内置进度条（阻塞主线程）
+            }
+
+            diameter = params.get("diameter", 0.0)
+            if diameter > 0:
+                eval_kwargs["diameter"] = diameter
+
+            eval_kwargs["bsize"] = 256
+            eval_kwargs["tile_overlap"] = 0.1
+            eval_kwargs["resample"] = False
+
+            # 3D vs 非 3D 路径（互斥）
+            use_3d = (block.ndim >= 3) and True  # do_3d=True
+
+            if use_3d:
+                eval_kwargs["do_3D"] = True
+                eval_kwargs["z_axis"] = 0
+                if params.get("anisotropy", 1.0) != 1.0:
+                    eval_kwargs["anisotropy"] = params["anisotropy"]
+            else:
+                eval_kwargs["do_3D"] = False
+                eval_kwargs["flow_threshold"] = params.get("flow_threshold", 0.4)
+                eval_kwargs["cellprob_threshold"] = params.get("cellprob_threshold", 0.0)
+
+            # 执行分割
+            masks, flows, styles = model.eval(block, **eval_kwargs)
+
+            return masks.astype(np.uint16)
+
+        finally:
+            # 释放模型（减少引用计数；不触发 GPU 同步/清缓存）
+            _model_cache.release_model(model, device_hint)
+
+            # 显式删除中间变量，帮助 Python GC 及时回收
+            if masks is not None:
+                del masks
+            if flows is not None:
+                del flows
+            if styles is not None:
+                del styles
+
+            # 低频可配置的显存清理（默认关闭，避免每个 chunk 都同步拖慢吞吐）
+            _do_cuda_cache_cleanup()

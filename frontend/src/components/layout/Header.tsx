@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect, type ChangeEvent } from 'react';
 import { useReactFlow, getNodesBounds, getViewportForBounds } from '@xyflow/react';
 import { useFlow } from '../../hooks/useFlowContext';
+import type { ExecutionPhase, WebSocketStatus } from '../../types';
 
 const SunIcon = () => <span>☀️</span>;
 const MoonIcon = () => <span>🌙</span>;
@@ -16,7 +17,8 @@ export default function Header() {
     workflows, activeWorkflowId,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow,
     runFlow, stopFlow, setNodes, setEdges, isConnected,
-    nodeDefs  // ← 获取最新的节点定义
+    nodeDefs,
+    executionState, websocketStatus,  // 新增
   } = useFlow();
 
   const reactFlowInstance = useReactFlow();
@@ -274,6 +276,27 @@ export default function Header() {
         </button>
 
         <div className="h-4 w-[1px] bg-[var(--node-border)] mx-1"></div>
+
+        {/* Status capsule */}
+        <div className="flex items-center gap-1.5 mr-1" title={`Execution: ${executionState.phase}`}>
+          {/* WS dot */}
+          <div className={`w-1.5 h-1.5 rounded-full ${
+            websocketStatus === 'connected' ? 'bg-green-500' :
+            websocketStatus === 'reconnecting' ? 'bg-yellow-400 animate-pulse' :
+            'bg-red-500'
+          }`} />
+          {/* Phase label — increased from 9px to 10px */}
+          <span className="text-[10px] font-mono font-bold uppercase tracking-wider
+            ${executionState.phase === 'running' || executionState.phase === 'cancelling' ? 'text-yellow-400' : ''}
+            ${executionState.phase === 'succeeded' ? 'text-green-400' : ''}
+            ${executionState.phase === 'failed' ? 'text-red-400' : ''}
+            ${executionState.phase === 'cancelled' ? 'text-gray-400' : ''}
+            ${executionState.phase === 'idle' ? 'text-[var(--text-sub)]' : ''}
+            ${['graph_building','submitted'].includes(executionState.phase) ? 'text-blue-400' : ''}
+          `">
+            {executionState.phase === 'idle' ? 'ready' : executionState.phase.replace('_', '')}
+          </span>
+        </div>
 
         <button
              onClick={() => fileInputRef.current?.click()}

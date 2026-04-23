@@ -34,7 +34,7 @@ export const useFlowOperations = (
     const newNodes: Node<NodeData>[] = [];
     const offset = 20 + Math.random() * 30; // 随机偏移防止重叠
 
-    // 1. 复制节点并重生成 ID
+    // 1. 复制节点并重生成 ID（清理所有运行时字段）
     cpNodes.forEach(n => {
        const newId = `${n.data.opType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
        idMap.set(n.id, newId);
@@ -42,7 +42,23 @@ export const useFlowOperations = (
          ...n, id: newId,
          position: { x: n.position.x + offset, y: n.position.y + offset },
          selected: true,
-         data: { ...n.data, progress: 0, message: '' } // 重置运行状态
+         className: n.className ? n.className.replace('node-running-pulse', '').trim() : '',
+         data: {
+           ...n.data,
+           // 清理所有运行时字段
+           progress: 0,
+           message: '',
+           runState: undefined,
+           progressRole: undefined,
+           waitingFor: undefined,
+           device: undefined,
+           totalChunks: undefined,
+           processedChunks: undefined,
+           completedInferenceChunks: undefined,
+           skippedChunks: undefined,
+           failedChunks: undefined,
+           executionId: undefined,
+         }
        });
     });
 
