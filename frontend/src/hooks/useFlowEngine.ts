@@ -100,6 +100,7 @@ export const useFlowEngine = (
   const mountedRef = useRef(true);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finishedRef = useRef(false);
+  const restoredExecutionRef = useRef(false); // tracks if current session was restored via subscribe
 
   // ============================================================
   // 1. 获取节点定义（只在 mount 时）
@@ -135,9 +136,10 @@ export const useFlowEngine = (
         if (!updates.has(n.id)) return n;
         const data = updates.get(n.id)!;
 
+        const runStateChanged = n.data.runState !== data.runState;
         const progressChanged = n.data.progress !== data.progress;
         const messageChanged = n.data.message !== data.message;
-        if (!progressChanged && !messageChanged) return n;
+        if (!runStateChanged && !progressChanged && !messageChanged) return n;
 
         return {
           ...n,
@@ -220,6 +222,7 @@ export const useFlowEngine = (
         // 重连恢复
         const storedExecutionId = sessionStorage.getItem('brainflow_execution_id');
         if (storedExecutionId) {
+          restoredExecutionRef.current = true;
           ws.send(JSON.stringify({ command: 'subscribe', executionId: storedExecutionId }));
           addLog(`Attempting to restore execution ${storedExecutionId}...`, 'info');
         }
@@ -231,10 +234,11 @@ export const useFlowEngine = (
         setWebsocketStatus('disconnected');
         wsRef.current = null;
 
-        // code=1005 = 客户端未完成 close handshake，不是服务端主动断
-        // 排除 manualClose（manualClose 在 unmount cleanup 中设置）
+        // 网络断开时标记 execution 为 failed（重连成功后可恢复）
         const reconnecting = event.code !== 1000; // 1000 = intentional close
         if (reconnecting) {
+          dispatchExecution({ type: 'FINISH', status: 'failed', message: 'Connection lost. Reconnecting...' });
+          setEdges(eds => eds.map(e => e.animated ? { ...e, animated: false } : e));
           console.log('[useFlowEngine] scheduling reconnect in 1s');
           reconnectTimerRef.current = setTimeout(connectWs, 1000);
         }
@@ -293,13 +297,14 @@ export const useFlowEngine = (
             type: 'SET_SNAPSHOT',
             snapshot: {
               phase: msg.status === 'running' ? 'running'
+                : msg.status === 'cancelling' ? 'cancelling'
                 : msg.status === 'succeeded' ? 'succeeded'
                 : msg.status === 'failed' ? 'failed'
                 : msg.status === 'cancelled' ? 'cancelled'
                 : 'idle',
               executionId: msg.executionId ?? null,
-              startedAt: msg.createdAt ? new Date(msg.createdAt).getTime() : null,
-              finishedAt: msg.finishedAt ? new Date(msg.finishedAt).getTime() : null,
+              startedAt: msg.createdAt ?? null,
+              finishedAt: msg.finishedAt ?? null,
               totalNodes: msg.nodeCount ?? 0,
               totalChunks: msg.totalChunks ?? 0,
               processedChunks: msg.processedChunks ?? 0,
@@ -308,6 +313,11 @@ export const useFlowEngine = (
               failedChunks: msg.failedChunks ?? 0,
             }
           });
+
+          // 重连恢复时：如果 execution 还在 running，立即恢复连线动画
+          if (msg.status === 'running') {
+            setEdges(eds => eds.map(e => ({ ...e, animated: true })));
+          }
           return;
         }
 
@@ -364,7 +374,12 @@ export const useFlowEngine = (
           if (finishedRef.current) return;
           finishedRef.current = true;
 
-          const status = msg.status ?? 'succeeded';
+          // cancelling 不是终态，只作为中间状态，不 dispatch FINISH
+          if (msg.status === 'cancelling') {
+            return;
+          }
+
+          const status = (msg.status === 'running' ? 'succeeded' : msg.status) ?? 'succeeded';
           sessionStorage.removeItem('brainflow_execution_id');
           dispatchExecution({ type: 'FINISH', status, message: msg.message });
 
@@ -389,6 +404,7 @@ export const useFlowEngine = (
         }
 
         // LEGACY: error（非 execution_finished 的 error）
+        // @ts-expect-error - legacy compatibility path, msgType 'error' is a valid type but shouldn't reach here in normal flow
         if (msgType === 'error' && !finishedRef.current) {
           // 这个分支已经在上面处理了，保留给 legacy 兼容
           const status = msg.status === 'cancelled' ? 'cancelled' : 'failed';
@@ -405,6 +421,19 @@ export const useFlowEngine = (
         if (msgType === 'subscribed') {
           if (msg.executionId) {
             addLog(`Restored execution ${msg.executionId}`, 'success');
+            // 如果是重连恢复的 execution，立即恢复连线动画
+            if (restoredExecutionRef.current) {
+              restoredExecutionRef.current = false;
+              setEdges(eds => eds.map(e => ({ ...e, animated: true })));
+            }
+          }
+          return;
+        }
+
+        // execution_control_ack（stop 响应）
+        if (msgType === 'execution_control_ack') {
+          if (msg.message) {
+            addLog(msg.message, 'warning');
           }
           return;
         }

@@ -5,13 +5,13 @@ import FlowEditor from './components/flow/FlowEditor';
 
 export default function App() {
   return (
-      <div className="w-screen h-screen flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)] overflow-hidden font-sans transition-colors duration-300">
+      <div className="w-screen h-screen flex flex-col overflow-hidden font-sans transition-colors duration-300"
+        style={{ backgroundColor: 'var(--color-bg-app)', color: 'var(--color-text-primary)' }}>
         <Header />
         <div className="flex-1 flex overflow-hidden relative">
           <Sidebar />
-          <main className="flex-1 relative flex flex-col bg-[var(--bg-canvas)] overflow-hidden">
+          <main className="flex-1 relative flex flex-col overflow-hidden">
             <FlowEditor />
-
             <BottomPanel />
           </main>
         </div>

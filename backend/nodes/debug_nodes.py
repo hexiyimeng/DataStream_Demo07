@@ -1,13 +1,12 @@
 """
-Debug BlockMap nodes for visual verification of pipeline execution.
+用于可视化验证流水线执行的 Debug BlockMap 节点。
 
-DaskChunkMarker: A BlockMap node that applies clearly visible per-chunk patterns,
-making it easy to verify that the pipeline actually executed and which chunks
-were processed.
+DaskChunkMarker：一个 BlockMap 节点，应用明显可见的逐 chunk 图案，
+便于验证流水线确实执行了，以及哪些 chunk 被处理了。
 
-Use case: Reader -> ROI -> DaskChunkMarker -> Writer
-Look at the output zarr: you should see distinct patterns per chunk that prove
-the node ran on every chunk, not just "a progress bar moving".
+使用链路：Reader -> ROI -> DaskChunkMarker -> Writer
+查看输出 zarr：每个 chunk 应显示不同的图案，证明节点处理了每个 chunk，
+而不仅仅是"进度条在走"。
 """
 
 import logging
@@ -22,23 +21,23 @@ logger = logging.getLogger("BrainFlow.DebugNodes")
 @register_node("DaskChunkMarker")
 class DaskChunkMarker(BaseBlockMapNode):
     """
-    BlockMap debug node that applies clearly visible per-chunk markers.
+    BlockMap debug 节点，应用明显可见的逐 chunk 标记。
 
-    Unlike DaskScaleShift (which adds subtle float offsets), this node applies
-    STRONG, EASY-TO-SEE per-chunk visual patterns so users can verify execution:
-    - Output data will show distinct patterns per chunk in any zarr viewer
-    - Chunk borders become clearly visible
-    - Different chunks get visually distinct values
+    与 DaskScaleShift（添加微妙的浮点偏移）不同，本节点应用
+    强烈、易于观察的逐 chunk 视觉图案，便于用户验证执行：
+    - 输出数据在任何 zarr 查看器中显示每个 chunk 的明显不同图案
+    - chunk 边界清晰可见
+    - 不同 chunk 得到视觉上不同的值
 
-    Modes:
-      checkerboard  : alternating 0/max value checker pattern per cell
-      border_frame  : bright solid border + interior = 0
-      chunk_index   : each chunk gets a unique uint16 value (good for uint16 output)
-      stripe_h      : horizontal stripes (good for any dtype)
-      stripe_v      : vertical stripes
-      gradient      : diagonal gradient (visible even after后续节点加工)
+    模式：
+      checkerboard  : 每个 cell 交替 0/max 值的棋盘格图案
+      border_frame  : 明亮实心边框 + 内部 = 0
+      chunk_index   : 每个 chunk 得到唯一的 uint16 值（适用于 uint16 输出）
+      stripe_h      : 水平条纹（适用于任何 dtype）
+      stripe_v      : 垂直条纹
+      gradient      : 对角渐变（即使后续节点加工后仍可见）
 
-    Visual strength (肉眼可辨程度):
+    肉眼可辨程度：
       checkerboard  > border_frame > chunk_index > stripe_h/v > gradient
 
     推荐链路验证:
@@ -49,15 +48,15 @@ class DaskChunkMarker(BaseBlockMapNode):
     DISPLAY_NAME = "Chunk Marker (Debug)"
     PROGRESS_TYPE = ProgressType.CHUNK_COUNT
 
-    # Safe defaults: process all blocks, fail loudly on error
+    # 安全默认值：处理所有 blocks，错误时大声失败
     SKIP_EMPTY_BLOCKS = True
     SKIP_ALL_ZERO_BLOCKS = False
     FAILURE_POLICY = "raise"
 
-    # Force uint16 output so marker values are clearly distinct
+    # 强制 uint16 输出，使标记值明显区分
     OUTPUT_DTYPE = np.uint16
 
-    # Logging throttle: only log first N chunks per node instance
+    # 日志节流：每个节点实例只打印前 N 个 chunk
     _log_counter = 0
     _LOG_CHUNK_LIMIT = 4  # 安全阈值：每个节点最多打印前 4 个 chunk
 

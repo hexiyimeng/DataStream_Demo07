@@ -1,272 +1,240 @@
-// src/components/layout/BottomPanel.tsx
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useFlow } from '../../hooks/useFlowContext';
-import type { ExecutionPhase, WebSocketStatus } from '../../types';
+import { Pill } from '../ui/Pill';
+import { IconButton } from '../ui/IconButton';
+import { Button } from '../ui/Button';
 
 function shortId(id: string | null): string {
-  if (!id) return '—';
-  return id.slice(0, 8);
+  return id ? id.slice(0, 8) : '—';
 }
-
-function formatTime(ts: string | number) {
+function formatTime(ts: string | number): string {
   if (!ts) return '--:--:--';
-  const date = new Date(ts);
-  if (isNaN(date.getTime())) return '--:--:--';
-  return date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '--:--:--';
+  return d.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-// === Status pill component ===
-const StatusPill = ({ label, value, color }: { label: string; value: string; color: string }) => (
-  <div className="flex items-center gap-1.5">
-    <span className="text-[9px] uppercase tracking-wider font-mono opacity-50 shrink-0">{label}</span>
-    <span className={`text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-sm border ${color}`}>{value}</span>
-  </div>
-);
+const PHASE_LABELS: Record<string, string> = {
+  idle: 'Idle', graph_building: 'Building', submitted: 'Queued',
+  running: 'Running', cancelling: 'Stopping', succeeded: 'Done',
+  failed: 'Failed', cancelled: 'Cancelled',
+};
+const PHASE_PILL: Record<string, 'idle' | 'info' | 'running' | 'success' | 'danger' | 'warning' | 'muted'> = {
+  idle: 'idle', graph_building: 'info', submitted: 'info',
+  running: 'running', cancelling: 'warning', succeeded: 'success',
+  failed: 'danger', cancelled: 'warning',
+};
 
-// === WebSocket status color ===
-function wsStatusColor(s: WebSocketStatus): string {
-  if (s === 'connected') return 'text-green-500 border-green-500/40 bg-green-500/10';
-  if (s === 'reconnecting') return 'text-yellow-500 border-yellow-500/40 bg-yellow-500/10';
-  return 'text-red-500 border-red-500/40 bg-red-500/10';
-}
+type Tab = 'logs' | 'errors';
 
-// === Execution phase color & label ===
-function phaseLabel(p: ExecutionPhase): string {
-  const map: Record<ExecutionPhase, string> = {
-    idle: 'Idle',
-    graph_building: 'Building...',
-    submitted: 'Submitted',
-    running: 'Running',
-    cancelling: 'Cancelling',
-    succeeded: 'Done',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  };
-  return map[p] ?? p;
-}
+const LOG_ICONS: Record<string, string> = { error: '✕', success: '✓', warning: '⚠', info: '›' };
+const LOG_COLORS: Record<string, string> = {
+  error: 'var(--color-danger)',
+  success: 'var(--color-success)',
+  warning: 'var(--color-warning)',
+  info: 'var(--color-console-info)',
+};
 
-function phaseColor(p: ExecutionPhase): string {
-  const map: Record<string, string> = {
-    idle: 'text-[var(--text-sub)] border-[var(--node-border)] bg-transparent',
-    graph_building: 'text-blue-400 border-blue-400/40 bg-blue-400/10',
-    submitted: 'text-blue-400 border-blue-400/40 bg-blue-400/10',
-    running: 'text-yellow-400 border-yellow-400/40 bg-yellow-400/10',
-    cancelling: 'text-orange-400 border-orange-400/40 bg-orange-400/10',
-    succeeded: 'text-green-400 border-green-400/40 bg-green-400/10',
-    failed: 'text-red-400 border-red-400/40 bg-red-400/10',
-    cancelled: 'text-gray-400 border-gray-400/40 bg-gray-400/10',
-  };
-  return map[p] ?? 'text-[var(--text-sub)] border-[var(--node-border)] bg-transparent';
-}
-
-// === Main component ===
 export default function BottomPanel() {
-  const {
-    logs, clearLogs, isConsoleOpen, toggleConsole,
-    executionState, websocketStatus, isExecuting, isCancelling, stopFlow,
-  } = useFlow();
-
-  // Auto-expand on reconnecting when execution is active
-  useEffect(() => {
-    if (websocketStatus === 'reconnecting' && executionState.executionId && !isConsoleOpen) {
-      toggleConsole(); // expand panel when reconnecting with active execution
-    }
-  }, [websocketStatus, executionState.executionId, isConsoleOpen, toggleConsole]);
-
+  const { logs, clearLogs, isConsoleOpen, toggleConsole, executionState, websocketStatus, isExecuting, isCancelling, stopFlow } = useFlow();
+  const [tab, setTab] = useState<Tab>('logs');
   const endRef = useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState(192);
+  const [height, setHeight] = useState(220);
   const isDragging = useRef(false);
 
-  // Auto-scroll logs
   useEffect(() => {
     if (isConsoleOpen) endRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs, isConsoleOpen]);
 
-  // Drag-to-resize
+  useEffect(() => {
+    if (websocketStatus === 'reconnecting' && executionState.executionId && !isConsoleOpen) toggleConsole();
+  }, [websocketStatus, executionState.executionId, isConsoleOpen, toggleConsole]);
+
   const startResizing = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isDragging.current = true;
-    document.body.style.cursor = 'row-resize';
-    document.body.style.userSelect = 'none';
+    e.preventDefault(); isDragging.current = true;
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
   }, []);
-
   const stopResizing = useCallback(() => {
-    isDragging.current = false;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
+    isDragging.current = false; document.body.style.cursor = ''; document.body.style.userSelect = '';
   }, []);
-
   const resize = useCallback((e: MouseEvent) => {
-    if (isDragging.current) {
-      const newHeight = window.innerHeight - e.clientY;
-      setHeight(Math.max(32, Math.min(newHeight, window.innerHeight * 0.8)));
-    }
+    if (isDragging.current) setHeight(Math.max(100, Math.min(window.innerHeight - e.clientY, window.innerHeight * 0.7)));
   }, []);
-
   useEffect(() => {
     window.addEventListener('mousemove', resize);
     window.addEventListener('mouseup', stopResizing);
-    return () => {
-      window.removeEventListener('mousemove', resize);
-      window.removeEventListener('mouseup', stopResizing);
-    };
+    return () => { window.removeEventListener('mousemove', resize); window.removeEventListener('mouseup', stopResizing); };
   }, [resize, stopResizing]);
 
-  // Derived display values
   const phase = executionState.phase;
   const execId = executionState.executionId;
+  const errorLogs = useMemo(() => logs.filter(l => l.type === 'error'), [logs]);
+
   const mainMessage = useMemo(() => {
     if (phase === 'idle') return 'Ready';
-    if (phase === 'graph_building') return 'Building Graph...';
-    if (phase === 'submitted') return 'Submitted';
-    if (phase === 'running') {
-      if (executionState.totalChunks > 0) {
-        return `${executionState.processedChunks}/${executionState.totalChunks} chunks`;
-      }
-      return 'Running';
-    }
-    if (phase === 'cancelling') return 'Cancelling...';
-    if (phase === 'succeeded') return 'Finished Successfully';
-    if (phase === 'failed') {
-      // Show error reason more clearly when failed
-      const err = executionState.lastError;
-      return err ? `Failed: ${err.slice(0, 80)}` : 'Failed';
-    }
-    if (phase === 'cancelled') return 'Cancelled';
+    if (phase === 'graph_building') return 'Building graph...';
+    if (phase === 'submitted') return 'Execution queued';
+    if (phase === 'running') return 'Workflow running';
+    if (phase === 'cancelling') return 'Stopping...';
+    if (phase === 'succeeded') return 'Completed successfully';
+    if (phase === 'failed') return executionState.lastError ? `Failed: ${executionState.lastError.slice(0, 80)}` : 'Execution failed';
+    if (phase === 'cancelled') return 'Execution cancelled';
     return phase;
-  }, [phase, executionState]);
+  }, [phase, executionState.lastError]);
 
-  // Has chunk stats
-  const hasChunkStats = executionState.totalChunks > 0;
-  const chunkSummary = hasChunkStats
-    ? `${executionState.processedChunks}/${executionState.totalChunks}`
-    : null;
+  const wsVariant = websocketStatus === 'connected' ? 'success' : websocketStatus === 'reconnecting' ? 'warning' : 'danger';
+  const wsLabel = websocketStatus === 'connected' ? 'Connected' : websocketStatus === 'reconnecting' ? 'Reconnecting' : 'Offline';
 
   return (
     <div
-      className={`
-        absolute bottom-0 left-0 w-full z-40 flex flex-col transition-none ease-in-out
-        border-t border-[var(--console-border)]
-        bg-[var(--console-bg)] text-[var(--console-text)]
-        shadow-[0_-4px_20px_rgba(0,0,0,0.1)]
-      `}
-      style={{ height: isConsoleOpen ? height : 48 }}
+      className="absolute bottom-0 left-0 w-full z-40 flex flex-col"
+      style={{
+        height: isConsoleOpen ? height : 42,
+        backgroundColor: 'var(--color-console-bg)',
+        borderTop: '1px solid var(--color-console-border)',
+        transition: 'height 200ms ease',
+      }}
     >
-      {/* Drag handle (only when open) */}
+      {/* Resize handle */}
       {isConsoleOpen && (
         <div
           onMouseDown={startResizing}
-          className="absolute top-0 left-0 w-full h-1 cursor-row-resize hover:bg-blue-500/50 z-50 -mt-0.5"
-        />
+          className="absolute top-0 left-0 right-0 h-1.5 cursor-row-resize z-50 flex items-center justify-center"
+          style={{ top: 0 }}
+          onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-accent-soft)')}
+          onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+        >
+          <div className="w-10 h-0.5 rounded-full" style={{ backgroundColor: 'var(--color-border-default)' }} />
+        </div>
       )}
 
-      {/* ===== Summary bar (always visible) ===== */}
+      {/* ---- Collapsed / Summary bar ---- */}
       <div
-        className="h-12 border-b border-[var(--console-border)] flex items-center justify-between px-4 select-none shrink-0"
+        className="h-[42px] shrink-0 flex items-center px-3 gap-3 border-b cursor-pointer select-none"
+        style={{ borderColor: 'var(--color-console-border)' }}
         onClick={toggleConsole}
       >
-        <div className="flex items-center gap-4 flex-1 min-w-0">
-
-          {/* Collapse chevron */}
-          <div className={`transition-transform duration-200 ${isConsoleOpen ? 'rotate-0' : '-rotate-90'}`}>
-            ▼
-          </div>
-
-          {/* WebSocket status */}
-          <StatusPill
-            label="WS"
-            value={websocketStatus === 'connected' ? 'Connected' : websocketStatus === 'reconnecting' ? 'Reconnecting' : 'Disconnected'}
-            color={wsStatusColor(websocketStatus)}
-          />
-
-          {/* Execution phase */}
-          <StatusPill
-            label="EXEC"
-            value={phaseLabel(phase)}
-            color={phaseColor(phase)}
-          />
-
-          {/* executionId */}
-          {execId && (
-            <StatusPill
-              label="ID"
-              value={shortId(execId)}
-              color="text-cyan-400 border-cyan-400/40 bg-cyan-400/10"
-            />
-          )}
-
-          {/* Main message */}
-          <span className="text-[11px] font-mono text-[var(--console-text)] truncate">
-            {mainMessage}
-          </span>
-
-          {/* Chunk stats */}
-          {chunkSummary && (
-            <span className="text-[10px] font-mono text-green-400 shrink-0">
-              ✓ {chunkSummary}
-            </span>
-          )}
-
-          {/* Inference/skipped/failed breakdown */}
-          {hasChunkStats && executionState.completedInferenceChunks > 0 && (
-            <span className="text-[9px] font-mono text-[var(--text-sub)] shrink-0">
-              inf={executionState.completedInferenceChunks}
-              {executionState.skippedChunks > 0 && ` skip=${executionState.skippedChunks}`}
-              {executionState.failedChunks > 0 && ` fail=${executionState.failedChunks}`}
-            </span>
-          )}
+        {/* Collapse chevron */}
+        <div
+          className="w-4 h-4 flex items-center justify-center transition-transform duration-150"
+          style={{ transform: isConsoleOpen ? 'rotate(0deg)' : 'rotate(-90deg)', color: 'var(--color-text-muted)' }}
+        >
+          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M7 10l5 5 5-5z" />
+          </svg>
         </div>
 
-        {/* Buttons */}
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Stop button — only when executing or cancelling */}
-          {(isExecuting || isCancelling) && (
-            <button
-              onClick={(e) => { e.stopPropagation(); stopFlow(); }}
-              className="text-[10px] px-2 py-1 rounded font-bold border border-red-500/50 text-red-400 hover:bg-red-500/20 transition-all uppercase"
-            >
-              Stop
-            </button>
-          )}
+        {/* WS status */}
+        <Pill variant={wsVariant} dot pulse={websocketStatus === 'reconnecting'} className="text-[9px]">
+          {wsLabel}
+        </Pill>
 
-          <button
-            onClick={(e) => { e.stopPropagation(); clearLogs(); }}
-            className="text-[10px] px-2 py-1 rounded hover:bg-[var(--widget-bg)] opacity-60 hover:opacity-100 transition-all uppercase font-semibold border border-transparent hover:border-[var(--console-border)]"
-          >
-            Clear
-          </button>
+        {/* Phase */}
+        <Pill variant={PHASE_PILL[phase] ?? 'muted'} dot pulse={phase === 'running' || phase === 'cancelling'} className="text-[9px]">
+          {PHASE_LABELS[phase] ?? phase}
+        </Pill>
+
+        {/* Execution ID */}
+        {execId && (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0" style={{ backgroundColor: 'var(--color-bg-field)', color: 'var(--color-info)', border: '1px solid var(--color-info)/20' }}>
+            {shortId(execId)}
+          </span>
+        )}
+
+        {/* Message */}
+        <span className="flex-1 truncate text-[11px] font-mono" style={{ color: 'var(--color-console-text)' }}>
+          {mainMessage}
+        </span>
+
+        {/* Actions */}
+        <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+          {(isExecuting || isCancelling) && (
+            <Button variant="danger" size="xs" onClick={stopFlow}>■ Stop</Button>
+          )}
+          <IconButton size="xs" onClick={() => clearLogs()} title="Clear logs">
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </IconButton>
         </div>
       </div>
 
-      {/* ===== Log area (expanded) ===== */}
+      {/* ---- Expanded body ---- */}
       {isConsoleOpen && (
-        <div className="flex-1 overflow-y-auto p-2 font-mono text-[11px] leading-relaxed custom-scrollbar select-text bg-[var(--console-bg)]">
-          {logs.length === 0 ? (
-            <div className="opacity-40 p-2 italic">{'>'} System ready... Waiting for workflow execution.</div>
-          ) : (
-            logs.map((log) => (
-              <div key={log.id} className="flex gap-3 py-0.5 hover:bg-[var(--widget-bg)] px-2 rounded-sm border-l-2 border-transparent hover:border-blue-500/30 transition-colors">
-                <span className="opacity-40 w-16 shrink-0 select-none text-right">
-                  {formatTime(log.timestamp)}
-                </span>
-                <span className={`flex-1 break-all tracking-tight
-                  ${log.type === 'error' ? 'text-red-500 font-bold' : ''}
-                  ${log.type === 'success' ? 'text-green-600 dark:text-green-400 font-bold' : ''}
-                  ${log.type === 'warning' ? 'text-amber-500' : ''}
-                  ${log.type === 'info' ? 'text-[var(--console-text)]' : ''}
-                `}>
-                  <span className="opacity-50 mr-2 select-none">
-                    {log.type === 'error' && '✗'}
-                    {log.type === 'success' && '✓'}
-                    {log.type === 'warning' && '⚠'}
-                    {log.type === 'info' && '>'}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          {/* Tab bar */}
+          <div className="flex items-center gap-0.5 px-3 pt-1.5 pb-1 border-b shrink-0" style={{ borderColor: 'var(--color-console-border)' }}>
+            {(['logs', 'errors'] as Tab[]).map(t => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className="px-3 py-1 rounded-[var(--radius-sm)] text-[10px] font-semibold uppercase tracking-wider transition-all"
+                style={{
+                  backgroundColor: tab === t ? 'var(--color-accent-soft)' : 'transparent',
+                  color: tab === t ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                }}
+              >
+                {t}
+                {t === 'errors' && errorLogs.length > 0 && (
+                  <span className="ml-1 px-1 py-px rounded-full text-[9px]" style={{ backgroundColor: 'var(--color-danger-soft)', color: 'var(--color-danger)' }}>
+                    {errorLogs.length}
                   </span>
-                  {log.message}
-                </span>
-              </div>
-            ))
-          )}
-          <div ref={endRef} />
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Log list */}
+          <div className="flex-1 overflow-y-auto custom-scrollbar font-mono">
+            {tab === 'logs' && (
+              logs.length === 0 ? (
+                <div className="px-4 py-4 text-[11px] italic" style={{ color: 'var(--color-text-muted)' }}>
+                  {'>'} System ready. No logs yet.
+                </div>
+              ) : (
+                logs.map(log => (
+                  <div
+                    key={log.id}
+                    className="flex items-start gap-3 px-3 py-0.5 hover:bg-[var(--color-bg-field-hover)] border-l-2 transition-colors"
+                    style={{ borderColor: log.type === 'error' ? 'var(--color-danger)' : log.type === 'warning' ? 'var(--color-warning)' : 'transparent' }}
+                  >
+                    <span className="text-[10px] shrink-0 w-16 text-right pt-px" style={{ color: 'var(--color-text-muted)' }}>
+                      {formatTime(log.timestamp)}
+                    </span>
+                    <span style={{ color: LOG_COLORS[log.type] ?? 'var(--color-console-info)' }} className="text-[12px] shrink-0 w-3 flex items-center justify-center">
+                      {LOG_ICONS[log.type] ?? '›'}
+                    </span>
+                    <span className="text-[11px] flex-1 break-all" style={{ color: 'var(--color-console-text)' }}>
+                      {log.message}
+                    </span>
+                  </div>
+                ))
+              )
+            )}
+            {tab === 'errors' && (
+              errorLogs.length === 0 ? (
+                <div className="px-4 py-4 text-[11px] italic" style={{ color: 'var(--color-text-muted)' }}>
+                  No errors. All good.
+                </div>
+              ) : (
+                errorLogs.map(log => (
+                  <div
+                    key={log.id}
+                    className="flex items-start gap-3 px-3 py-0.5 hover:bg-[var(--color-bg-field-hover)] border-l-2 border-[var(--color-danger)] transition-colors"
+                  >
+                    <span className="text-[10px] shrink-0 w-16 text-right pt-px" style={{ color: 'var(--color-text-muted)' }}>
+                      {formatTime(log.timestamp)}
+                    </span>
+                    <span className="text-[12px] shrink-0 w-3 flex items-center justify-center" style={{ color: 'var(--color-danger)' }}>✕</span>
+                    <span className="text-[11px] flex-1 break-all" style={{ color: 'var(--color-danger)' }}>
+                      {log.message}
+                    </span>
+                  </div>
+                ))
+              )
+            )}
+            <div ref={endRef} />
+          </div>
         </div>
       )}
     </div>

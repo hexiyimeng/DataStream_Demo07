@@ -1,15 +1,77 @@
 import { useRef, useState, useEffect, type ChangeEvent } from 'react';
 import { useReactFlow, getNodesBounds, getViewportForBounds } from '@xyflow/react';
 import { useFlow } from '../../hooks/useFlowContext';
-import type { ExecutionPhase, WebSocketStatus } from '../../types';
+import { Button } from '../ui/Button';
+import { IconButton } from '../ui/IconButton';
+import { Pill } from '../ui/Pill';
 
-const SunIcon = () => <span>☀️</span>;
-const MoonIcon = () => <span>🌙</span>;
-const LoadIcon = () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>;
-const SaveIcon = () => <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>;
-const PlusIcon = () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>;
-const XIcon = () => <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>;
-const DaskIcon = () => <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" /></svg>;
+const SunIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+  </svg>
+);
+const MoonIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+  </svg>
+);
+const LoadIcon = () => (
+  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+  </svg>
+);
+const SaveIcon = () => (
+  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+  </svg>
+);
+const PlusIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+  </svg>
+);
+const XIcon = () => (
+  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+  </svg>
+);
+const DaskIcon = () => (
+  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+    <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+  </svg>
+);
+const RunIcon = () => (
+  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+    <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+  </svg>
+);
+const StopIcon = () => (
+  <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+  </svg>
+);
+
+const PHASE_LABELS: Record<string, string> = {
+  idle: 'Ready',
+  graph_building: 'Building',
+  submitted: 'Queued',
+  running: 'Running',
+  cancelling: 'Stopping',
+  succeeded: 'Done',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+const PHASE_PILL: Record<string, 'idle' | 'info' | 'running' | 'success' | 'danger' | 'warning' | 'muted'> = {
+  idle: 'idle',
+  graph_building: 'info',
+  submitted: 'info',
+  running: 'running',
+  cancelling: 'warning',
+  succeeded: 'success',
+  failed: 'danger',
+  cancelled: 'warning',
+};
 
 export default function Header() {
   const {
@@ -18,311 +80,212 @@ export default function Header() {
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow,
     runFlow, stopFlow, setNodes, setEdges, isConnected,
     nodeDefs,
-    executionState, websocketStatus,  // 新增
+    executionState,
   } = useFlow();
 
   const reactFlowInstance = useReactFlow();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dashboardUrl, setDashboardUrl] = useState<string>('');
 
-  // 获取实际的 Dask Dashboard URL
   useEffect(() => {
-    const fetchDashboardUrl = async () => {
-      if (!isConnected) return;
-      try {
-        const apiUrl = `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/dashboard_url`;
-        const response = await fetch(apiUrl);
-        const data = await response.json();
-        if (data.dashboard_url) {
-          // 确保 URL 以 /status 结尾，这样可以直接打开到状态页面
-          const url = data.dashboard_url.endsWith('/status') ? data.dashboard_url : `${data.dashboard_url}/status`;
+    if (!isConnected) return;
+    fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/dashboard_url`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.dashboard_url) {
+          const url = d.dashboard_url.endsWith('/status') ? d.dashboard_url : `${d.dashboard_url}/status`;
           setDashboardUrl(url);
         }
-      } catch (err) {
-        console.warn('Failed to fetch dashboard URL:', err);
-      }
-    };
-    fetchDashboardUrl();
+      })
+      .catch(() => {});
   }, [isConnected]);
 
-  // === 1. 保存逻辑 (自动使用当前标签名) ===
   const handleSave = () => {
     if (!reactFlowInstance) return;
-
     const currentFlow = workflows.find(w => w.id === activeWorkflowId);
     const defaultName = currentFlow ? currentFlow.name : `workflow_${Date.now()}`;
-
-    const fileName = prompt("保存工作流为:", defaultName);
+    const fileName = prompt("Save workflow as:", defaultName);
     if (fileName === null) return;
-
     const finalName = fileName.trim() || defaultName;
     const flowData = reactFlowInstance.toObject();
-
-    const exportData = {
-      ...flowData,
-      workflow_name: finalName,
-      timestamp: Date.now()
-    };
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
+    const blob = new Blob([JSON.stringify({ ...flowData, workflow_name: finalName, timestamp: Date.now() }, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
-    link.href = url;
+    link.href = URL.createObjectURL(blob);
     link.download = `${finalName}.json`;
     document.body.appendChild(link);
     link.click();
-
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(link.href);
   };
 
-
-
-    // === 修改 handleLoad 函数 ===
-    const handleLoad = (e: ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        try {
-          const flow = JSON.parse(event.target?.result as string);
-
-          // 1. 基础验证
-          if (!Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
-            alert("文件格式错误：缺少 nodes 或 edges");
-            return;
-          }
-
-          // 2. 设置状态 (先设为空，防止 ID 冲突，可选)
-          setNodes([]);
-          setEdges([]);
-
-          // 3. 延迟一下再设置新数据
-          setTimeout(() => {
-              const invalidNodes: string[] = [];
-              const updatedNodes: string[] = [];
-
-              // 关键修复：使用最新的 nodeDefs 更新节点的 nodeSpec
-              const processedNodes = flow.nodes.map((node: any) => {
-                  const opType = node.data?.opType;
-                  const latestSpec = nodeDefs[opType];
-
-                  if (!latestSpec) {
-                      // 节点不存在了！
-                      invalidNodes.push(opType);
-                      console.warn(`[Load] 节点类型 '${opType}' 在后端不存在`);
-
-                      // 用旧的 nodeSpec，但标记为无效
-                      return {
-                          ...node,
-                          data: {
-                              ...node.data,
-                              nodeSpec: node.data?.nodeSpec || { display_name: opType, input: {}, output: [] },
-                              _invalid: true,
-                              _warning: `节点 '${opType}' 已被后端移除，请手动替换`
-                          }
-                      };
-                  }
-
-                  // 节点存在，使用最新定义
-                  updatedNodes.push(opType);
-
-                  return {
-                      ...node,
-                      data: {
-                          ...node.data,
-                          nodeSpec: latestSpec,  // 使用最新的节点定义
-                          _invalid: undefined,
-                          _warning: undefined
-                      }
-                  };
-              });
-
-              setNodes(processedNodes);
-              setEdges(flow.edges);
-
-              // 4. 显示加载结果提示
-              let message = `工作流已加载，包含 ${processedNodes.length} 个节点`;
-              if (updatedNodes.length > 0) {
-                  message += `（${updatedNodes.length} 个节点已更新为最新版本）`;
-              }
-              if (invalidNodes.length > 0) {
-                  message += `\n⚠️ 警告：${invalidNodes.length} 个节点已失效 (${invalidNodes.join(', ')})`;
-              }
-
-              console.log(`[Load] ${message}`);
-
-              // 如果有失效节点，也弹出警告
-              if (invalidNodes.length > 0) {
-                  alert(message);
-              }
-
-              // 5. 安全地重命名 (加个判断)
-              if (flow.workflow_name && activeWorkflowId) {
-                 try {
-                    renameWorkflow(activeWorkflowId, flow.workflow_name);
-                 } catch (err) {
-                    console.warn("重命名工作流失败，但不影响加载:", err);
-                 }
-              }
-
-              // 6. 调整视图
-              const bounds = getNodesBounds(processedNodes);
-              if (bounds && bounds.width > 0) {
-                 const { x, y, zoom } = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
-                 reactFlowInstance.setViewport({ x, y, zoom });
-              }
-          }, 0);
-
-        } catch (error) {
-          console.error("加载工作流详细错误: ", error);
-          alert(`无法加载工作流: ${(error as Error).message}`);
+  const handleLoad = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const flow = JSON.parse(ev.target?.result as string);
+        if (!Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
+          alert("Invalid file format"); return;
         }
-      };
-      reader.readAsText(file);
-      e.target.value = '';
+        setNodes([]); setEdges([]);
+        setTimeout(() => {
+          const invalid: string[] = [], updated: string[] = [];
+          const processed = flow.nodes.map((node: any) => {
+            const latestSpec = nodeDefs[node.data?.opType];
+            if (!latestSpec) { invalid.push(node.data?.opType); return { ...node, data: { ...node.data, nodeSpec: node.data?.nodeSpec || {}, _invalid: true, _warning: `Node '${node.data?.opType}' removed` } }; }
+            updated.push(node.data?.opType);
+            return { ...node, data: { ...node.data, nodeSpec: latestSpec } };
+          });
+          setNodes(processed); setEdges(flow.edges);
+          if (invalid.length) alert(`Loaded ${processed.length} nodes (${invalid.length} invalid)`);
+          if (flow.workflow_name && activeWorkflowId) { try { renameWorkflow(activeWorkflowId, flow.workflow_name); } catch {} }
+          const bounds = getNodesBounds(processed);
+          if (bounds && bounds.width > 0) {
+            const vp = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
+            reactFlowInstance.setViewport(vp);
+          }
+        }, 0);
+      } catch (err) {
+        alert(`Load failed: ${(err as Error).message}`);
+      }
     };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const phase = executionState.phase;
+  const isRunning = phase === 'running' || phase === 'cancelling';
+  const phaseLabel = PHASE_LABELS[phase] ?? phase;
 
   return (
-    <header className="h-12 bg-[var(--node-header)] border-b border-[var(--node-border)] flex items-center justify-between px-2 z-30 transition-colors duration-300 select-none">
-
+    <header
+      className="h-12 flex items-center px-3 gap-3 border-b select-none"
+      style={{
+        backgroundColor: 'var(--color-bg-surface)',
+        borderColor: 'var(--color-border-subtle)',
+        boxShadow: 'var(--shadow-panel)',
+        zIndex: 30,
+      }}
+    >
       <input type="file" ref={fileInputRef} onChange={handleLoad} accept=".json" className="hidden" />
 
-      {/* 1. Logo 区域 */}
-      <div className="flex items-center gap-2 w-48 pl-2">
-         <div className="w-5 h-5 bg-blue-600 rounded flex items-center justify-center text-white font-bold text-[10px] shadow-sm">
-            BF
-         </div>
-         <span className="text-sm font-bold text-[var(--text-head)] tracking-tight">
-           Brain<span className="text-blue-500">Flow</span>
-         </span>
-      </div>
-
-      {/* 2. 中间：工作流 Tabs (Chrome 风格) - 已修复滚动条问题 */}
-      <div className="
-        flex-1 flex items-end justify-start h-full px-4 gap-1
-        overflow-x-auto overflow-y-hidden
-        [&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none']
-      ">
-         {workflows.map(wf => {
-           const isActive = wf.id === activeWorkflowId;
-           return (
-             <div
-               key={wf.id}
-               onClick={() => switchWorkflow(wf.id)}
-               onDoubleClick={() => {
-                 const newName = prompt("重命名工作流:", wf.name);
-                 if (newName) renameWorkflow(wf.id, newName.trim());
-               }}
-               className={`
-                 group relative flex items-center gap-2 px-3 h-9 rounded-t-lg transition-all cursor-pointer min-w-[120px] max-w-[200px] border-t border-x
-                 ${isActive 
-                   ? 'bg-[var(--bg-canvas)] border-[var(--node-border)] text-[var(--text-head)] font-medium z-10' 
-                   : 'bg-[var(--bg-node)] border-transparent text-[var(--text-label)] hover:bg-[var(--widget-hover)] opacity-80 hover:opacity-100 mt-1 h-8'}
-               `}
-             >
-               <span className="truncate text-xs flex-1">{wf.name}</span>
-
-               {workflows.length > 1 && (
-                 <button
-                   onClick={(e) => {
-                     e.stopPropagation();
-                     if(confirm(`确定要删除 "${wf.name}" 吗?`)) deleteWorkflow(wf.id);
-                   }}
-                   className={`w-4 h-4 rounded-full flex items-center justify-center hover:bg-red-500/20 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity`}
-                 >
-                   <XIcon />
-                 </button>
-               )}
-
-               {isActive && <div className="absolute -bottom-[1px] left-0 w-full h-[1px] bg-[var(--bg-canvas)] z-20"></div>}
-             </div>
-           );
-         })}
-
-         <button
-           onClick={createWorkflow}
-           className="h-8 w-8 mb-0.5 flex items-center justify-center text-[var(--text-sub)] hover:text-[var(--text-head)] hover:bg-[var(--widget-bg)] rounded-full transition-colors shrink-0"
-           title="New Workflow"
-         >
-           <PlusIcon />
-         </button>
-      </div>
-
-      {/* 3. 右侧：功能区 */}
-      <div className="flex items-center gap-2 w-fit justify-end pr-2">
-        <button
-          onClick={toggleTheme}
-          className="w-7 h-7 rounded bg-[var(--widget-bg)] hover:bg-[var(--node-body)] text-[var(--text-sub)] flex items-center justify-center transition-colors"
-          title="Toggle Theme"
+      {/* ---- Brand ---- */}
+      <div className="flex items-center gap-2.5 w-44 shrink-0">
+        <div
+          className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center text-white font-bold text-[11px] shrink-0"
+          style={{ backgroundColor: 'var(--color-accent)' }}
         >
-          {theme === 'dark' ? <MoonIcon /> : <SunIcon />}
-        </button>
+          BF
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[13px] font-bold leading-tight" style={{ color: 'var(--color-text-primary)' }}>
+            Brain<span style={{ color: 'var(--color-accent)' }}>Flow</span>
+          </span>
+          <span className="text-[9px] leading-tight" style={{ color: 'var(--color-text-muted)' }}>Workflow Studio</span>
+        </div>
+      </div>
 
+      {/* ---- Tabs ---- */}
+      <div className="flex-1 flex items-end h-full gap-0.5 overflow-x-auto overflow-y-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none']">
+        {workflows.map(wf => {
+          const isActive = wf.id === activeWorkflowId;
+          return (
+            <div
+              key={wf.id}
+              onClick={() => switchWorkflow(wf.id)}
+              onDoubleClick={() => { const n = prompt("Rename:", wf.name); if (n) renameWorkflow(wf.id, n.trim()); }}
+              className={[
+                'group relative flex items-center gap-1.5 px-3 rounded-t-md transition-all cursor-pointer min-w-[90px] max-w-[160px] border',
+              ].join(' ')}
+              style={{
+                height: isActive ? 'calc(100% + 1px)' : '28px',
+                marginTop: isActive ? '0' : '4px',
+                backgroundColor: isActive ? 'var(--color-bg-canvas)' : 'var(--color-bg-field)',
+                borderColor: isActive ? 'var(--color-border-subtle)' : 'transparent',
+                borderBottomColor: isActive ? 'var(--color-bg-canvas)' : 'transparent',
+                color: isActive ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+                fontWeight: isActive ? 500 : 400,
+                zIndex: isActive ? 2 : 1,
+              }}
+            >
+              <span className="truncate text-[11px] flex-1">{wf.name}</span>
+              {workflows.length > 1 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); if (confirm(`Delete "${wf.name}"?`)) deleteWorkflow(wf.id); }}
+                  className="w-4 h-4 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-500/20 hover:text-red-400 transition-all"
+                  style={{ color: 'var(--color-text-muted)' }}
+                >
+                  <XIcon />
+                </button>
+              )}
+              {isActive && (
+                <div className="absolute -bottom-px left-0 right-0 h-px" style={{ backgroundColor: 'var(--color-bg-canvas)' }} />
+              )}
+            </div>
+          );
+        })}
         <button
-          onClick={() => {
-            if (!dashboardUrl) {
-              alert('Dashboard not available. Please check if backend is connected.');
-              return;
-            }
-            window.open(dashboardUrl, '_blank');
-          }}
-          className="w-7 h-7 rounded bg-[var(--widget-bg)] hover:bg-[var(--node-body)] text-[var(--text-sub)] flex items-center justify-center transition-colors"
-          title="Open Dask Scheduler Dashboard"
+          onClick={createWorkflow}
+          className="h-7 w-7 flex items-center justify-center rounded transition-colors shrink-0 mt-0.5"
+          style={{ color: 'var(--color-text-muted)' }}
+          onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-bg-field-hover)')}
+          onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
+          title="New Workflow"
+        >
+          <PlusIcon />
+        </button>
+      </div>
+
+      {/* ---- Right Controls ---- */}
+      <div className="flex items-center gap-1 shrink-0">
+
+        {/* Execution phase pill */}
+        <Pill
+          variant={PHASE_PILL[phase] ?? 'muted'}
+          dot
+          pulse={phase === 'running' || phase === 'cancelling'}
+        >
+          {phaseLabel}
+        </Pill>
+
+        {/* Separator */}
+        <div className="w-px h-5 mx-0.5" style={{ backgroundColor: 'var(--color-border-subtle)' }} />
+
+        {/* Dashboard */}
+        <IconButton
+          onClick={() => { if (!dashboardUrl) { alert('Dashboard unavailable'); return; } window.open(dashboardUrl, '_blank'); }}
+          title="Dask Dashboard"
         >
           <DaskIcon />
-        </button>
+        </IconButton>
 
-        <div className="h-4 w-[1px] bg-[var(--node-border)] mx-1"></div>
+        {/* Theme */}
+        <IconButton onClick={toggleTheme} title="Toggle Theme">
+          {theme === 'dark' ? <MoonIcon /> : <SunIcon />}
+        </IconButton>
 
-        {/* Status capsule */}
-        <div className="flex items-center gap-1.5 mr-1" title={`Execution: ${executionState.phase}`}>
-          {/* WS dot */}
-          <div className={`w-1.5 h-1.5 rounded-full ${
-            websocketStatus === 'connected' ? 'bg-green-500' :
-            websocketStatus === 'reconnecting' ? 'bg-yellow-400 animate-pulse' :
-            'bg-red-500'
-          }`} />
-          {/* Phase label — increased from 9px to 10px */}
-          <span className="text-[10px] font-mono font-bold uppercase tracking-wider
-            ${executionState.phase === 'running' || executionState.phase === 'cancelling' ? 'text-yellow-400' : ''}
-            ${executionState.phase === 'succeeded' ? 'text-green-400' : ''}
-            ${executionState.phase === 'failed' ? 'text-red-400' : ''}
-            ${executionState.phase === 'cancelled' ? 'text-gray-400' : ''}
-            ${executionState.phase === 'idle' ? 'text-[var(--text-sub)]' : ''}
-            ${['graph_building','submitted'].includes(executionState.phase) ? 'text-blue-400' : ''}
-          `">
-            {executionState.phase === 'idle' ? 'ready' : executionState.phase.replace('_', '')}
-          </span>
-        </div>
+        {/* Separator */}
+        <div className="w-px h-5 mx-0.5" style={{ backgroundColor: 'var(--color-border-subtle)' }} />
 
-        <button
-             onClick={() => fileInputRef.current?.click()}
-             className="px-3 py-1.5 text-xs font-medium text-[var(--text-head)] hover:bg-[var(--widget-bg)] rounded transition-colors flex items-center gap-1"
-           >
-             <LoadIcon /> Load
-        </button>
-        <button
-             onClick={handleSave}
-             className="px-3 py-1.5 text-xs font-medium text-[var(--text-head)] hover:bg-[var(--widget-bg)] rounded transition-colors flex items-center gap-1"
-           >
-             <SaveIcon /> Save
-        </button>
+        {/* Load / Save */}
+        <IconButton onClick={() => fileInputRef.current?.click()} title="Load workflow">
+          <LoadIcon />
+        </IconButton>
+        <IconButton onClick={handleSave} title="Save workflow">
+          <SaveIcon />
+        </IconButton>
 
-        <button
-          onClick={runFlow}
-          className="ml-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-4 py-1.5 rounded shadow-sm transition-all active:scale-95"
-        >
-          QUEUE
-        </button>
-        <button
-        onClick={stopFlow}
-        className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-3 py-1.5 rounded shadow-sm transition-all active:scale-95"
-        >
-        STOP
-      </button>
+        {/* Run / Stop */}
+        {isRunning ? (
+          <Button variant="danger" size="sm" onClick={stopFlow} icon={<StopIcon />}>
+            Stop
+          </Button>
+        ) : (
+          <Button variant="primary" size="sm" onClick={runFlow} icon={<RunIcon />}>
+            Run
+          </Button>
+        )}
       </div>
     </header>
   );

@@ -18,6 +18,7 @@ export interface FlowContextType {
   currentExecutionId: string | null;
   isExecuting: boolean;        // phase in ['graph_building','submitted','running','cancelling']
   isCancelling: boolean;       // phase === 'cancelling'
+  isExecutionLocked: boolean;   // 运行中是否禁止修改（值、连线、增删节点）
   // Legacy
   isConnected: boolean;        // 保持兼容，等价于 websocketStatus === 'connected'
 
@@ -56,6 +57,13 @@ export interface FlowContextType {
   handleCopy: () => void;
   handlePaste: () => void;
   handleDelete: () => void;
+
+  // === Workflow ===
+  createWorkflow: () => void;
+  switchWorkflow: (id: string) => void;
+  deleteWorkflow: (id: string) => void;
+  renameWorkflow: (id: string, name: string) => void;
+  saveCurrentWorkflow: () => void;
 }
 
 export const FlowContext = React.createContext<FlowContextType | null>(null);

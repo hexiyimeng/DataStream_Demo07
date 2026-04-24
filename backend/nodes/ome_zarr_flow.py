@@ -8,7 +8,7 @@ import dask.array as da
 from core.registry import register_node, ProgressType
 from services.dask_service import dask_service
 from core.config import config
-from core.chunk_policy import ChunkPolicy, reader_init_chunks, RechunkReason
+from core.chunk_policy import ChunkPolicy
 
 
 # 创建logger
@@ -115,6 +115,7 @@ class OMEZarrReader:
 
         try:
             z_arr = None
+            z_arr_is_direct_array = False
             multiscales = []
 
             # =========================================================
@@ -122,6 +123,7 @@ class OMEZarrReader:
             # =========================================================
             try:
                 z_arr = zarr.open_array(file_path, mode='r')
+                z_arr_is_direct_array = True
                 logger.info(f"[ZarrReader] Loaded array directly from path")
             except Exception as e:
                 logger.debug(f"[ZarrReader] Not a direct array: {e}")
@@ -177,10 +179,7 @@ class OMEZarrReader:
             if not hasattr(z_arr, 'shape'):
                 raise ValueError(f"Loaded object is not a valid array")
 
-            # 4. 构建 Dask Array (懒加载)
-            dask_arr = da.from_zarr(z_arr)
-
-            # ==================== 收集文件信息 ====================
+            # ==================== 收集原始文件信息 ====================
             original_chunks = z_arr.chunks
             array_shape = z_arr.shape
             array_dtype = str(z_arr.dtype)
@@ -197,21 +196,11 @@ class OMEZarrReader:
             # 构建可读的形状描述
             shape_desc = self._format_shape_description(array_shape, dim_names)
 
-            file_info = f"""Zarr File Information:
-              Path: {file_path}
-              Dimensions: {ndim}D {shape_desc}
-              Data Type: {array_dtype}
-              Total Size: {total_gb:.2f} GB
-              Original Chunks: {original_chunks}
-              Original Chunk Size: {np.prod(original_chunks) * z_arr.dtype.itemsize / 1024**2:.2f} MB
-              Number of Chunks: {dask_arr.npartitions}
-            """
-
-            logger.info(f"[ZarrReader] File loaded: {shape_desc}, {total_gb:.2f}GB, {dask_arr.npartitions} chunks")
+            logger.info(f"[ZarrReader] File loaded: {shape_desc}, {total_gb:.2f}GB, original_chunks={original_chunks}")
 
             # ==================== Chunk 配置 (统一策略) ====================
             policy = ChunkPolicy()
-            policy.source_chunks = dask_arr.chunksize
+            policy.source_chunks = original_chunks  # 用原始 chunk 记录
 
             # chunk_mode 兼容性处理：旧的 "auto" 映射到 "default_3d"
             effective_chunk_mode = chunk_mode
@@ -219,39 +208,56 @@ class OMEZarrReader:
                 logger.warning("[ZarrReader] chunk_mode='auto' is deprecated, treating as 'default_3d'")
                 effective_chunk_mode = "default_3d"
 
+            # -------- 计算目标 chunk 元组 --------
             if effective_chunk_mode == "manual" and chunk_config:
-                # 手动模式：使用 chunk_config 字符串
-                dask_arr = reader_init_chunks(
-                    dask_arr,
-                    chunk_size=chunk_size,
-                    keep_first_dim=keep_first_dim,
-                    manual_config=chunk_config,
-                    policy=policy
+                target_chunks = self._parse_chunk_config(
+                    chunk_config, array_shape, ndim, chunk_size, keep_first_dim
                 )
             elif effective_chunk_mode == "default_3d":
-                # 默认3D模式：构造 chunk_config 字符串
+                # 构造 chunk_config 字符串
                 if ndim == 3:
                     config_str = f"{chunk_z},{chunk_y},{chunk_x}"
                 elif ndim == 4:
-                    config_str = f"-1,{chunk_z},{chunk_y},{chunk_x}"  # 保持第一维完整
+                    config_str = f"-1,{chunk_z},{chunk_y},{chunk_x}"
                 else:
-                    config_str = ""  # 使用默认
-                dask_arr = reader_init_chunks(
-                    dask_arr,
-                    chunk_size=chunk_size,
-                    keep_first_dim=keep_first_dim,
-                    manual_config=config_str,
-                    policy=policy
+                    config_str = f"{chunk_z},{chunk_y},{chunk_x}"
+                target_chunks = self._parse_chunk_config(
+                    config_str, array_shape, ndim, chunk_size, keep_first_dim
                 )
             else:
-                # 默认：使用默认 chunk_size
-                dask_arr = reader_init_chunks(
-                    dask_arr,
-                    chunk_size=chunk_size,
-                    keep_first_dim=keep_first_dim,
-                    manual_config=None,
-                    policy=policy
-                )
+                # 默认：使用 chunk_size 填充所有空间维
+                new_chunks = []
+                for i in range(ndim):
+                    if i == 0 and keep_first_dim:
+                        new_chunks.append(array_shape[i])
+                    else:
+                        new_chunks.append(min(chunk_size, array_shape[i]))
+                target_chunks = tuple(new_chunks)
+
+            logger.info(f"[ZarrReader] Target chunks: {target_chunks}")
+
+            # -------- 确定 array 路径 --------
+            # 策略1成功：file_path 本身就是 array，array_path 就是 file_path
+            # 策略2成功：file_path 是 group，array 在 file_path/dataset_path
+            if z_arr_is_direct_array:
+                array_path = file_path
+                logger.info(f"[ZarrReader] Array path (direct): {array_path}")
+            else:
+                if multiscales:
+                    datasets = multiscales[0].get("datasets", [])
+                    if datasets:
+                        dataset_path = datasets[0].get("path", "0")
+                    else:
+                        dataset_path = "0"
+                else:
+                    dataset_path = "0"
+                array_path = os.path.join(file_path, dataset_path)
+                logger.info(f"[ZarrReader] Array path (group): {array_path}")
+
+            # -------- 直接用目标 chunk 创建 Dask Array（跳过中间 rechunk）--------
+            # da.from_zarr(字符串路径, chunks=...) 会直接用目标 chunk 分块读取
+            dask_arr = da.from_zarr(array_path, chunks=target_chunks)
+            logger.info(f"[ZarrReader] Dask array created: shape={dask_arr.shape}, chunks={dask_arr.chunksize}, npartitions={dask_arr.npartitions}")
 
             policy.working_chunks = dask_arr.chunksize
             logger.info(f"[ZarrReader] Final chunks: {policy.working_chunks}")
@@ -275,6 +281,16 @@ class OMEZarrReader:
                     )
 
             # ==================== 构建元数据 ====================
+            file_info = f"""Zarr File Information:
+              Path: {file_path}
+              Dimensions: {ndim}D {shape_desc}
+              Data Type: {array_dtype}
+              Total Size: {total_gb:.2f} GB
+              Original Chunks: {original_chunks}
+              Original Chunk Size: {np.prod(original_chunks) * z_arr.dtype.itemsize / 1024**2:.2f} MB
+              Target Chunks: {target_chunks}
+            """
+
             metadata = {
                 "source_path": file_path,
                 "shape": dask_arr.shape,
@@ -337,6 +353,55 @@ class OMEZarrReader:
         for name, size in zip(dim_names, shape):
             parts.append(f"{name}={size}")
         return "(" + ", ".join(parts) + ")"
+
+    @staticmethod
+    def _parse_chunk_config(config_str, array_shape, ndim, chunk_size, keep_first_dim):
+        """
+        解析 chunk 配置字符串，返回目标 chunk 元组。
+
+        Args:
+            config_str: 逗号分隔的 chunk 配置，如 "64,512,512" 或 "-1,64,64"
+            array_shape: 原始数组形状
+            ndim: 维度数
+            chunk_size: 默认 chunk 大小
+            keep_first_dim: 是否保持第一维完整
+
+        Returns:
+            tuple: 目标 chunk 元组
+        """
+        if not config_str or not config_str.strip():
+            # 空配置：全部使用 chunk_size
+            new_chunks = []
+            for i in range(ndim):
+                if i == 0 and keep_first_dim:
+                    new_chunks.append(array_shape[i])
+                else:
+                    new_chunks.append(min(chunk_size, array_shape[i]))
+            return tuple(new_chunks)
+
+        parts = [p.strip().lower() for p in config_str.split(",")]
+
+        new_chunks = []
+        for i, part in enumerate(parts):
+            if i >= ndim:
+                break
+            if part == "auto" or part == "-1":
+                # 该维度自动计算
+                if i == 0 and keep_first_dim:
+                    new_chunks.append(array_shape[i])
+                else:
+                    new_chunks.append(min(chunk_size, array_shape[i]))
+            else:
+                new_chunks.append(int(part))
+
+        # 填充剩余维度
+        while len(new_chunks) < ndim:
+            if len(new_chunks) == 0 and keep_first_dim:
+                new_chunks.append(array_shape[0])
+            else:
+                new_chunks.append(min(chunk_size, array_shape[len(new_chunks)]))
+
+        return tuple(new_chunks[:ndim])
 
 
 # =============================================================================

@@ -10,17 +10,17 @@ logger = logging.getLogger("BrainFlow.ScaleShift")
 @register_node("DaskScaleShift")
 class DaskScaleShift(BaseBlockMapNode):
     """
-    Simple BlockMap test node.
+    简单的 BlockMap 测试节点。
 
-    Per-block operation:
+    逐 block 操作：
         output = input * scale + bias
 
-    Purpose:
-    - test BaseBlockMapNode execution path
-    - test map_blocks wrapping
-    - test params passing
-    - test output dtype handling
-    - optionally test block_info-driven visible chunk markers
+    用途：
+    - 测试 BaseBlockMapNode 执行路径
+    - 测试 map_blocks 包装
+    - 测试参数传递
+    - 测试输出 dtype 处理
+    - 可选：测试 block_info 驱动的可见 chunk 标记
     """
 
     CATEGORY = "BrainFlow/Debug"

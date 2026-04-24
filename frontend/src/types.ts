@@ -110,10 +110,11 @@ export type WSMessageType =
   | 'executed'
   | 'execution_started'
   | 'execution_finished'   // 唯一权威终态事件
+  | 'execution_snapshot'   // 重连恢复时后端发送的全量状态快照
+  | 'execution_control_ack' // stop 响应
   | 'subscribed'
   | 'ping'
-  | 'pong'
-  | 'execution_snapshot';   // 重连恢复时后端发送的全量状态快照
+  | 'pong';
 
 export interface WSMessage {
   type: WSMessageType;
@@ -135,11 +136,14 @@ export interface WSMessage {
   failedChunks?: number;
 
   // --- execution_finished / execution_snapshot ---
-  status?: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  status?: 'running' | 'succeeded' | 'failed' | 'cancelled' | 'cancelling';
   createdAt?: number;
   finishedAt?: number;
   nodeCount?: number;
   logCount?: number;
+
+  // --- execution_control_ack ---
+  action?: string;
 }
 
 // === 工作流 (Workflow) ===

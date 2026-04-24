@@ -423,8 +423,17 @@ async def execute_graph(graph: dict, execution_id: str = None):
             nid for nid, d in graph.items()
             if getattr(NODE_CLASS_MAPPINGS.get(d["type"]), "OUTPUT_NODE", False)
         ]
-        if not output_nodes and graph:
-            output_nodes = [list(graph.keys())[-1]]
+        if not output_nodes:
+            # 没有 Output/Writer 节点，直接失败
+            logger.error("[Executor] No output node found. Please connect a Writer/Output node to execute the workflow.")
+            await state_manager.broadcast(execution_id, {
+                "type": "execution_finished",
+                "executionId": execution_id,
+                "status": "failed",
+                "message": "No output node found. Please connect a Writer/Output node to execute the workflow."
+            })
+            state_manager.add_log("No output node found. Cannot execute.", "error", execution_id=execution_id)
+            return
 
         # --- 共享状态 ---
         results = {}          # node_id -> output tuple (保持 lazy)
@@ -917,18 +926,12 @@ async def execute_graph(graph: dict, execution_id: str = None):
         # 取消路径：统一终态消息
         state_manager.set_execution_status(execution_id, ExecutionStatus.CANCELLED)
         await state_manager.broadcast(execution_id, {
-            "type": "execution_finished",   # <-- 唯一权威终态事件
+            "type": "execution_finished",
             "executionId": execution_id,
             "status": "cancelled",
             "message": "Execution Cancelled"
         })
-        # LEGACY COMPATIBILITY: error 事件，仅供旧前端使用
-        await state_manager.broadcast(execution_id, {
-            "type": "error",
-            "executionId": execution_id,
-            "status": "cancelled",
-            "message": "Cancelled"
-        })
+        state_manager.add_log("Execution Cancelled", "warning", execution_id=execution_id)
     except Exception as e:
         should_cancel_dask_objects = True
         traceback.print_exc()
@@ -940,35 +943,22 @@ async def execute_graph(graph: dict, execution_id: str = None):
             logger.warning(f"Exception during CANCELLING, finalizing as CANCELLED: {e}")
             state_manager.set_execution_status(execution_id, ExecutionStatus.CANCELLED)
             await state_manager.broadcast(execution_id, {
-                "type": "execution_finished",   # <-- 唯一权威终态事件
+                "type": "execution_finished",
                 "executionId": execution_id,
                 "status": "cancelled",
                 "message": f"Execution Cancelled (error during shutdown: {type(e).__name__})"
             })
-            # LEGACY COMPATIBILITY: error 事件
-            await state_manager.broadcast(execution_id, {
-                "type": "error",
-                "executionId": execution_id,
-                "status": "cancelled",
-                "message": "Cancelled"
-            })
+            state_manager.add_log(f"Cancellation error: {type(e).__name__}", "warning", execution_id=execution_id)
         else:
             # 真正的失败路径
             state_manager.set_execution_status(execution_id, ExecutionStatus.FAILED)
             await state_manager.broadcast(execution_id, {
-                "type": "execution_finished",   # <-- 唯一权威终态事件
+                "type": "execution_finished",
                 "executionId": execution_id,
                 "status": "failed",
                 "message": str(e)
             })
             state_manager.add_log(f"Global Error: {str(e)}", "error", execution_id=execution_id)
-            # LEGACY COMPATIBILITY: error 事件
-            await state_manager.broadcast(execution_id, {
-                "type": "error",
-                "executionId": execution_id,
-                "status": "failed",
-                "message": str(e)
-            })
     finally:
         # === 内存快照：execution 结束（清理前） ===
         mem_monitor.log_snapshot("execution_end_before_cleanup", client=client)

@@ -1,10 +1,9 @@
 // src/context/FlowContext.tsx
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNodesState, useEdgesState, addEdge, type Connection, type Node, type Edge, type OnConnectStart, type OnConnectEnd } from '@xyflow/react';
-import type { LogEntry, NodeData, ExecutionPhase } from '../types';
+import type { LogEntry, NodeData } from '../types';
 import { FlowContext } from './FlowContextDef';
 
-// 引入所有拆分的 Hooks
 import { useUndoRedo } from '../hooks/useUndoRedo';
 import { useAutoSave } from '../hooks/useAutoSave';
 import { useFlowOperations } from '../hooks/useFlowOperations';
@@ -61,19 +60,14 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // B. 历史快照触发器（只在非运行态更新时触发 undo snapshot）
   useEffect(() => {
     syncCurrentState(nodes, edges);
-    // submitted/running/cancelling 节点存在时，跳过快照
-    // 这些都是 active execution 状态，不应进入 undo 历史
     const hasActiveExecution = nodes.some(
-      n => n.data.runState === 'submitted' || n.data.runState === 'running' || n.data.runState === 'cancelling'
+      n => n.data.runState === 'submitted' || n.data.runState === 'running'
     );
     if (!hasActiveExecution) takeSnapshot();
   }, [nodes, edges, syncCurrentState, takeSnapshot]);
 
   // C. 自动保存 (LocalStorage)
   useAutoSave(nodes, edges, setNodes, setEdges);
-
-  // D. 交互操作 (复制/粘贴/快捷键)
-  const { handleCopy, handlePaste, handleDelete } = useFlowOperations(nodes, edges, setNodes, setEdges, undo, redo, addLog);
 
   // E. 工作流管理 (多 Tab)
   const {
@@ -98,8 +92,11 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     || executionState.phase === 'running'
     || executionState.phase === 'cancelling';
   const isCancelling = executionState.phase === 'cancelling';
-  // 兼容旧接口
+  const isExecutionLocked = isExecuting;
   const isConnected = websocketStatus === 'connected';
+
+  // D. 交互操作 (复制/粘贴/快捷键) — 必须在 isExecutionLocked 定义之后
+  const { handleCopy, handlePaste, handleDelete } = useFlowOperations(nodes, edges, setNodes, setEdges, undo, redo, addLog, isExecutionLocked);
 
   // ===========================================
   // 4. 连接校验与辅助 (Helpers)
@@ -125,20 +122,23 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [nodes]);
 
   const onConnect = useCallback((params: Connection) => {
+    if (isExecutionLocked) { addLog('Cannot connect while executing', 'warning'); return; }
     if (isValidConnection(params)) {
       setEdges(eds => addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds));
     } else { addLog('Invalid Connection', 'error'); }
-  }, [setEdges, isValidConnection, addLog]);
+  }, [setEdges, isValidConnection, addLog, isExecutionLocked]);
 
   const onConnectStart: OnConnectStart = useCallback((_, { nodeId, handleId, handleType }) => {
+    if (isExecutionLocked) return;
     if (handleType !== 'source') return;
     const node = nodes.find(n => n.id === nodeId);
     if (node) setConnectingType(node.data.nodeSpec?.output?.[parseInt(handleId || '0')] || null);
-  }, [nodes]);
+  }, [nodes, isExecutionLocked]);
 
   const onConnectEnd: OnConnectEnd = useCallback(() => setConnectingType(null), []);
 
   const addNodeAt = useCallback((type: string, position: {x: number, y: number}) => {
+    if (isExecutionLocked) { addLog('Cannot add node while executing', 'warning'); return; }
     const spec = nodeDefs[type];
     if (!spec) return;
     setNodes(nds => nds.concat({
@@ -153,7 +153,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
         message: '',
       }
     }));
-  }, [nodeDefs, setNodes]);
+  }, [nodeDefs, setNodes, addLog, isExecutionLocked]);
 
   const addNode = useCallback((type: string) => addNodeAt(type, { x: Math.random() * 400 + 200, y: Math.random() * 300 + 100 }), [addNodeAt]);
 
@@ -165,30 +165,25 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   // 5. Context Memoization
   // ===========================================
   const contextValue = useMemo(() => ({
-    // State
     nodes, edges, nodeDefs, isConnected: isConnected, logs, workflows, activeWorkflowId,
-    // --- Execution state (新增) ---
     executionState,
     websocketStatus,
     currentExecutionId: executionState.executionId,
     isExecuting,
     isCancelling,
-    // Actions
+    isExecutionLocked,
     setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
     addNode, addNodeAt, updateNodeData,
     runFlow, stopFlow, clearLogs,
-    // Workflow Actions
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,
-    // UI
     theme, toggleTheme, isConsoleOpen, toggleConsole,
     isValidConnection, undo, redo,
     onConnectStart, onConnectEnd, connectingType,
     handleCopy, handlePaste, handleDelete,
   }), [
-    // 依赖列表
     nodes, edges, nodeDefs, isConnected, logs, workflows, activeWorkflowId,
     theme, isConsoleOpen, connectingType,
-    executionState, websocketStatus, isExecuting, isCancelling,
+    executionState, websocketStatus, isExecuting, isCancelling, isExecutionLocked,
     setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
     addNode, addNodeAt, updateNodeData, runFlow, stopFlow, clearLogs,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,

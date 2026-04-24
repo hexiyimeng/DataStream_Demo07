@@ -2,248 +2,551 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ========================================================================
+   BRAINFLOW DESIGN SYSTEM — CSS CUSTOM PROPERTIES
+   Professional Scientific Workflow Node Editor
+   ======================================================================== */
+
 @layer base {
   :root {
-    /* ==== ☀️ 亮色模式 (Light Mode) ==== */
-    --bg-canvas: #f0f2f5;
-    --bg-grid-minor: #e2e8f0;
-    --bg-grid-major: #cbd5e1;
+    /* ===================================================================
+       ☀️ LIGHT MODE — Clean scientific tool aesthetic
+       =================================================================== */
 
-    --node-header: #ffffff;
-    --node-body: #f8fafc;
-    --node-border: #cbd5e1;
+    /* ---- Color: Background ---- */
+    --color-bg-app: #f1f5f9;
+    --color-bg-canvas: #f8fafc;
+    --color-bg-surface: #ffffff;
+    --color-bg-surface-2: #f1f5f9;
+    --color-bg-surface-3: #e8edf4;
+    --color-bg-field: #f8fafc;
+    --color-bg-field-hover: #f1f5f9;
+    --color-bg-overlay: rgba(15, 23, 42, 0.5);
 
-    --widget-bg: #e2e8f0;
-    --widget-hover: #cbd5e1;
+    /* ---- Color: Text ---- */
+    --color-text-primary: #0f172a;
+    --color-text-secondary: #475569;
+    --color-text-muted: #94a3b8;
+    --color-text-disabled: #cbd5e1;
+    --color-text-inverse: #ffffff;
 
-    --text-head: #1e293b;
-    --text-label: #64748b;
-    --text-val: #0f172a;
-    --text-sub: #94a3b8;
+    /* ---- Color: Border ---- */
+    --color-border-subtle: #e2e8f0;
+    --color-border-default: #cbd5e1;
+    --color-border-strong: #94a3b8;
+    --color-border-focus: #3b82f6;
 
-    --edge-stroke: #94a3b8;
+    /* ---- Color: Accent ---- */
+    --color-accent: #3b82f6;
+    --color-accent-hover: #2563eb;
+    --color-accent-soft: rgba(59, 130, 246, 0.10);
 
-    /* 控制台配色 (亮色) */
-    --console-bg: #ffffff;
-    --console-border: #e2e8f0;
-    --console-text: #334155;
-    --console-info: #0ea5e9;
+    /* ---- Color: Semantic ---- */
+    --color-success: #22c55e;
+    --color-success-soft: rgba(34, 197, 94, 0.10);
+    --color-warning: #f59e0b;
+    --color-warning-soft: rgba(245, 158, 11, 0.10);
+    --color-danger: #ef4444;
+    --color-danger-soft: rgba(239, 68, 68, 0.10);
+    --color-info: #0ea5e9;
+    --color-info-soft: rgba(14, 165, 233, 0.10);
+
+    /* ---- Color: Node ---- */
+    --color-node-bg: #ffffff;
+    --color-node-header: #f1f5f9;
+    --color-node-body: #ffffff;
+    --color-node-field: #f8fafc;
+    --color-node-field-hover: #f1f5f9;
+    --color-node-border: #e2e8f0;
+    --color-node-border-hover: #cbd5e1;
+    --color-node-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --color-node-shadow-hover: 0 4px 16px rgba(0,0,0,0.10), 0 2px 4px rgba(0,0,0,0.06);
+    --color-node-shadow-selected: 0 0 0 2px rgba(59,130,246,0.40), 0 4px 20px rgba(59,130,246,0.15);
+
+    /* ---- Color: Canvas ---- */
+    --color-canvas-grid-minor: #e8edf4;
+    --color-canvas-grid-major: #d4dbe8;
+    --color-canvas-vignette: rgba(248,250,252,0.0);
+
+    /* ---- Color: Edge ---- */
+    --color-edge: #94a3b8;
+    --color-edge-selected: #3b82f6;
+
+    /* ---- Color: Handle ---- */
+    --color-handle-input: #22c55e;
+    --color-handle-output: #3b82f6;
+
+    /* ---- Color: Console ---- */
+    --color-console-bg: #ffffff;
+    --color-console-border: #e2e8f0;
+    --color-console-text: #334155;
+    --color-console-info: #0ea5e9;
+    --color-console-log: #64748b;
+    --color-console-success: #16a34a;
+    --color-console-warning: #d97706;
+    --color-console-error: #dc2626;
+
+    /* ---- Spacing ---- */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+
+    /* ---- Radius ---- */
+    --radius-xs: 3px;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-full: 9999px;
+
+    /* ---- Shadow ---- */
+    --shadow-panel: 0 1px 3px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.04);
+    --shadow-elevated: 0 2px 8px rgba(0,0,0,0.08), 0 8px 24px rgba(0,0,0,0.06);
+    --shadow-floating: 0 4px 16px rgba(0,0,0,0.12), 0 16px 48px rgba(0,0,0,0.08);
+    --shadow-dropdown: 0 2px 8px rgba(0,0,0,0.08), 0 8px 24px rgba(0,0,0,0.06);
+
+    /* ---- Motion ---- */
+    --motion-fast: 120ms ease;
+    --motion-normal: 200ms ease;
+    --motion-slow: 300ms ease;
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* ===================================================================
+       LEGACY ALIASES (backward compat — internal only)
+       =================================================================== */
+    --bg-canvas: var(--color-bg-canvas);
+    --bg-panel: var(--color-bg-surface);
+    --bg-node: var(--color-node-bg);
+    --bg-node-header: var(--color-node-header);
+    --bg-node-body: var(--color-node-body);
+    --bg-node-field: var(--color-node-field);
+    --text-primary: var(--color-text-primary);
+    --text-secondary: var(--color-text-secondary);
+    --text-muted: var(--color-text-muted);
+    --border-subtle: var(--color-border-subtle);
+    --accent: var(--color-accent);
+    --accent-hover: var(--color-accent-hover);
+    --accent-soft: var(--color-accent-soft);
+    --widget-inner: var(--color-bg-surface);
+    --node-header: var(--color-node-header);
+    --node-body: var(--color-node-body);
+    --node-border: var(--color-node-border);
+    --text-head: var(--color-text-primary);
+    --text-label: var(--color-text-secondary);
+    --text-val: var(--color-text-primary);
+    --text-sub: var(--color-text-muted);
+    --bg-grid-minor: var(--color-canvas-grid-minor);
+    --console-bg: var(--color-console-bg);
+    --console-border: var(--color-console-border);
+    --console-text: var(--color-console-text);
+    --console-info: var(--color-console-info);
+    --console-log: var(--color-console-log);
+    --console-success: var(--color-console-success);
+    --console-warning: var(--color-console-warning);
+    --console-error: var(--color-console-error);
+    --shadow-node: var(--color-node-shadow);
+    --shadow-node-hover: var(--color-node-shadow-hover);
+    --shadow-node-selected: var(--color-node-shadow-selected);
+    --handle-input: var(--color-handle-input);
+    --handle-output: var(--color-handle-output);
+    --edge-stroke: var(--color-edge);
+    --edge-stroke-active: var(--color-edge-selected);
+    --widget-bg: var(--color-bg-surface-2);
+    --widget-hover: var(--color-bg-surface-3);
+    --status-running: var(--color-warning);
+    --status-done: var(--color-success);
+    --status-failed: var(--color-danger);
+    --status-cancelled: var(--color-text-muted);
+    --status-submitted: var(--color-accent);
+    --transition-fast: var(--motion-fast);
+    --transition-normal: var(--motion-normal);
+    --transition-slow: var(--motion-slow);
+    --bg-panel-elevated: var(--color-bg-surface-2);
+    --bg-grid-major: var(--color-canvas-grid-major);
   }
 
   .dark {
-    /* ==== 🌙 深色模式 (ComfyUI Style — 低饱和深灰、清晰边界、少发光) ==== */
-    --bg-canvas: #111111;
-    --bg-grid-minor: #1a1a1a;
-    --bg-grid-major: #0a0a0a;
+    /* ===================================================================
+       🌙 DARK MODE — ComfyUI-inspired professional dark editor
+       =================================================================== */
 
-    --node-header: #2a2a2a;
-    --node-body: #1e1e1e;
-    --node-border: #3a3a3a;
+    /* ---- Color: Background ---- */
+    --color-bg-app: #090b10;
+    --color-bg-canvas: #0f1114;
+    --color-bg-surface: #16181e;
+    --color-bg-surface-2: #1c1f27;
+    --color-bg-surface-3: #22262f;
+    --color-bg-field: #14171c;
+    --color-bg-field-hover: #1e222b;
+    --color-bg-overlay: rgba(0, 0, 0, 0.7);
 
-    --widget-bg: #252525;
-    --widget-hover: #303030;
+    /* ---- Color: Text ---- */
+    --color-text-primary: #e2e8f0;
+    --color-text-secondary: #94a3b8;
+    --color-text-muted: #4b5563;
+    --color-text-disabled: #374151;
+    --color-text-inverse: #0f172a;
 
-    --text-head: #cccccc;
-    --text-label: #888888;
-    --text-val: #e0e0e0;
-    --text-sub: #666666;
+    /* ---- Color: Border ---- */
+    --color-border-subtle: #2a2e3a;
+    --color-border-default: #3a3f4f;
+    --color-border-strong: #4b5563;
+    --color-border-focus: #60a5fa;
 
-    --edge-stroke: #555555;
+    /* ---- Color: Accent ---- */
+    --color-accent: #3b82f6;
+    --color-accent-hover: #60a5fa;
+    --color-accent-soft: rgba(59, 130, 246, 0.15);
 
-    /* 控制台配色 (深色) — 更暗更干净 */
-    --console-bg: #0d0d0d;
-    --console-border: #2a2a2a;
-    --console-text: #bbbbbb;
-    --console-info: #4a9eff;
+    /* ---- Color: Semantic ---- */
+    --color-success: #34d399;
+    --color-success-soft: rgba(52, 211, 153, 0.12);
+    --color-warning: #fbbf24;
+    --color-warning-soft: rgba(251, 191, 36, 0.12);
+    --color-danger: #f87171;
+    --color-danger-soft: rgba(248, 113, 113, 0.12);
+    --color-info: #38bdf8;
+    --color-info-soft: rgba(56, 189, 248, 0.12);
+
+    /* ---- Color: Node ---- */
+    --color-node-bg: #1c1f27;
+    --color-node-header: #22262f;
+    --color-node-body: #1c1f27;
+    --color-node-field: #14171c;
+    --color-node-field-hover: #1e222b;
+    --color-node-border: #2a2e3a;
+    --color-node-border-hover: #3a3f4f;
+    --color-node-shadow: 0 2px 8px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
+    --color-node-shadow-hover: 0 4px 16px rgba(0,0,0,0.5), 0 2px 4px rgba(0,0,0,0.4);
+    --color-node-shadow-selected: 0 0 0 2px rgba(59,130,246,0.50), 0 4px 20px rgba(59,130,246,0.20);
+
+    /* ---- Color: Canvas ---- */
+    --color-canvas-grid-minor: #181b21;
+    --color-canvas-grid-major: #14171c;
+    --color-canvas-vignette: rgba(15, 17, 20, 0.0);
+
+    /* ---- Color: Edge ---- */
+    --color-edge: #374151;
+    --color-edge-selected: #60a5fa;
+
+    /* ---- Color: Handle ---- */
+    --color-handle-input: #34d399;
+    --color-handle-output: #3b82f6;
+
+    /* ---- Color: Console ---- */
+    --color-console-bg: #0c0e14;
+    --color-console-border: #1e222b;
+    --color-console-text: #c8d3e4;
+    --color-console-info: #38bdf8;
+    --color-console-log: #6b7a8f;
+    --color-console-success: #34d399;
+    --color-console-warning: #fbbf24;
+    --color-console-error: #f87171;
+
+    /* ---- Spacing ---- */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+
+    /* ---- Radius ---- */
+    --radius-xs: 3px;
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 16px;
+    --radius-full: 9999px;
+
+    /* ---- Shadow ---- */
+    --shadow-panel: 0 1px 3px rgba(0,0,0,0.4), 0 4px 12px rgba(0,0,0,0.3);
+    --shadow-elevated: 0 2px 8px rgba(0,0,0,0.5), 0 8px 24px rgba(0,0,0,0.4);
+    --shadow-floating: 0 4px 16px rgba(0,0,0,0.6), 0 16px 48px rgba(0,0,0,0.5);
+    --shadow-dropdown: 0 2px 8px rgba(0,0,0,0.5), 0 8px 24px rgba(0,0,0,0.4);
+
+    /* ---- Motion ---- */
+    --motion-fast: 120ms ease;
+    --motion-normal: 200ms ease;
+    --motion-slow: 300ms ease;
+    --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* ===================================================================
+       LEGACY ALIASES (backward compat — internal only)
+       =================================================================== */
+    --bg-canvas: var(--color-bg-canvas);
+    --bg-panel: var(--color-bg-surface);
+    --bg-node: var(--color-node-bg);
+    --bg-node-header: var(--color-node-header);
+    --bg-node-body: var(--color-node-body);
+    --bg-node-field: var(--color-node-field);
+    --text-primary: var(--color-text-primary);
+    --text-secondary: var(--color-text-secondary);
+    --text-muted: var(--color-text-muted);
+    --border-subtle: var(--color-border-subtle);
+    --accent: var(--color-accent);
+    --accent-hover: var(--color-accent-hover);
+    --accent-soft: var(--color-accent-soft);
+    --widget-inner: var(--color-bg-surface);
+    --node-header: var(--color-node-header);
+    --node-body: var(--color-node-body);
+    --node-border: var(--color-node-border);
+    --text-head: var(--color-text-primary);
+    --text-label: var(--color-text-secondary);
+    --text-val: var(--color-text-primary);
+    --text-sub: var(--color-text-muted);
+    --bg-grid-minor: var(--color-canvas-grid-minor);
+    --console-bg: var(--color-console-bg);
+    --console-border: var(--color-console-border);
+    --console-text: var(--color-console-text);
+    --console-info: var(--color-console-info);
+    --console-log: var(--color-console-log);
+    --console-success: var(--color-console-success);
+    --console-warning: var(--color-console-warning);
+    --console-error: var(--color-console-error);
+    --shadow-node: var(--color-node-shadow);
+    --shadow-node-hover: var(--color-node-shadow-hover);
+    --shadow-node-selected: var(--color-node-shadow-selected);
+    --handle-input: var(--color-handle-input);
+    --handle-output: var(--color-handle-output);
+    --edge-stroke: var(--color-edge);
+    --edge-stroke-active: var(--color-edge-selected);
+    --widget-bg: var(--color-bg-surface-2);
+    --widget-hover: var(--color-bg-surface-3);
+    --status-running: var(--color-warning);
+    --status-done: var(--color-success);
+    --status-failed: var(--color-danger);
+    --status-cancelled: var(--color-text-muted);
+    --status-submitted: var(--color-accent);
+    --transition-fast: var(--motion-fast);
+    --transition-normal: var(--motion-normal);
+    --transition-slow: var(--motion-slow);
+    --bg-panel-elevated: var(--color-bg-surface-2);
+    --bg-grid-major: var(--color-canvas-grid-major);
   }
 }
 
-body {
-  background-color: var(--bg-canvas);
-  color: var(--text-head);
-  font-family: 'Segoe UI', -apple-system, Roboto, sans-serif;
+/* ========================================================================
+   GLOBAL RESET & BASE
+   ======================================================================== */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
   overflow: hidden;
-  transition: background-color 0.2s;
 }
 
-/* === React Flow Overrides === */
-
-/* 1. Handle (连接点) */
-.react-flow__handle {
-  border-radius: 50%;
-  border: none !important;
-  box-shadow: 0 0 2px rgba(0,0,0,0.8);
-}
-.react-flow__handle:hover {
-  box-shadow: 0 0 0 2px white;
-}
-
-/* 2. Edge (连线) */
-.react-flow__edge-path {
-  stroke: var(--edge-stroke) !important;
-  opacity: 0.7;
-  stroke-width: 2px;
-}
-.react-flow__edge.selected .react-flow__edge-path {
-  stroke: #fff !important;
-  opacity: 1;
-  stroke-width: 3px !important;
+body {
+  background-color: var(--color-bg-app);
+  color: var(--color-text-primary);
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 13px;
+  line-height: 1.5;
+  transition: background-color var(--motion-normal), color var(--motion-normal);
 }
 
-/* 3. Node Selection (选中框) */
-.react-flow__node.selected .node-wrapper {
-  border: 1px solid #fff !important;
+/* ========================================================================
+   CUSTOM SCROLLBAR
+   ======================================================================== */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-default) transparent;
+}
+.custom-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: var(--color-border-default);
+  border-radius: var(--radius-full);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-text-muted);
+}
+
+/* ========================================================================
+   REACT FLOW OVERRIDES
+   ======================================================================== */
+
+/* ---- Canvas ---- */
+.react-flow__pane {
+  cursor: default !important;
+}
+.react-flow__node {
+  cursor: move;
+}
+.react-flow__node.selected > .node-wrapper {
+  box-shadow: var(--color-node-shadow-selected) !important;
+  border-color: var(--color-accent) !important;
 }
 .react-flow__node.selected {
   outline: none !important;
 }
-
-/* === ComfyUI 风格鼠标交互 (强制箭头) === */
-.react-flow__pane {
-  cursor: default !important;
+.react-flow__node.dragging {
+  box-shadow: 0 12px 40px rgba(0,0,0,0.4) !important;
+  z-index: 999 !important;
+  opacity: 0.92;
 }
 
-.react-flow__pane.panning,
-.react-flow__viewport.panning {
-  cursor: default !important;
+/* ---- Connection line ---- */
+.react-flow__connectionline path {
+  stroke: var(--color-accent);
+  stroke-width: 2;
+  stroke-opacity: 0.8;
 }
 
-.react-flow__node {
-    cursor: move;
+/* ---- Handles ---- */
+.react-flow__handle {
+  border-radius: 50% !important;
+  border: 1.5px solid rgba(0,0,0,0.2) !important;
+  transition: transform var(--motion-fast), box-shadow var(--motion-fast), background-color var(--motion-fast) !important;
+}
+.react-flow__handle:hover {
+  transform: scale(1.3);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+.react-flow__handle.connecting {
+  background-color: var(--color-border-default) !important;
+  border-color: transparent !important;
+}
+.react-flow__handle.connecting:hover,
+.react-flow__handle.handle-connecting {
+  background-color: var(--color-handle-input) !important;
+  box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.25);
+  transform: scale(1.25);
+}
+.react-flow__handle.handle-valid {
+  background-color: var(--color-success) !important;
+  box-shadow: 0 0 0 4px var(--color-success-soft);
 }
 
-/* === MiniMap 样式增强 === */
-.react-flow__minimap {
-  background-color: var(--bg-canvas) !important;
+/* ---- Edges ---- */
+.react-flow__edge-path {
+  stroke: var(--color-edge) !important;
+  stroke-width: 1.5px;
+  opacity: 0.65;
+  transition: stroke var(--motion-fast), opacity var(--motion-fast), stroke-width var(--motion-fast) !important;
 }
-
-.react-flow__minimap-node {
-  fill: #3b82f6 !important;
-  stroke: none;
-}
-
-.react-flow__minimap-edge {
-  stroke: var(--edge-stroke) !important;
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: var(--color-edge-selected) !important;
+  opacity: 1;
   stroke-width: 2px;
-  opacity: 0.6;
+}
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--color-edge-selected) !important;
+  opacity: 1;
+  stroke-width: 2px;
 }
 
+/* Animated running edge */
+.react-flow__edge.animated path {
+  stroke: var(--color-accent) !important;
+  stroke-width: 2px !important;
+  stroke-dasharray: 8 4;
+  animation: edge-flow 0.7s linear infinite !important;
+  opacity: 0.85 !important;
+}
+@keyframes edge-flow {
+  from { stroke-dashoffset: 12; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* ---- Minimap ---- */
+.react-flow__minimap {
+  background-color: var(--color-bg-surface) !important;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-subtle);
+  overflow: hidden;
+  box-shadow: var(--shadow-panel);
+}
+.react-flow__minimap-mask {
+  fill: rgba(0, 0, 0, 0.4) !important;
+}
+.react-flow__minimap-node {
+  fill: var(--color-accent) !important;
+  stroke: none;
+  rx: 2px;
+}
+.react-flow__minimap-edge {
+  stroke: var(--color-edge) !important;
+  stroke-width: 1px;
+  opacity: 0.5;
+}
+
+/* ---- Controls (hidden — we use custom toolbar) ---- */
+.react-flow__controls {
+  display: none !important;
+}
+
+/* ---- Background ---- */
+.react-flow__background {
+  background-color: var(--color-bg-canvas) !important;
+}
+
+/* ========================================================================
+   ANIMATIONS
+   ======================================================================== */
+
+/* Node running pulse */
+.node-running-pulse {
+  animation: node-running-pulse 2.4s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+@keyframes node-running-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4), var(--color-node-shadow); }
+  60%  { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0), var(--color-node-shadow); }
+  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0), var(--color-node-shadow); }
+}
+.node-running-pulse > .node-wrapper {
+  border-color: var(--color-accent) !important;
+}
+
+/* Progress shimmer */
+@keyframes shimmer {
+  0%   { transform: translateX(-150%); }
+  100% { transform: translateX(250%); }
+}
+.animate-shimmer {
+  animation: shimmer 1.8s infinite linear;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.dark .animate-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
+}
+
+/* Node collapse */
+.node-collapse-wrapper {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.node-collapse-wrapper.collapsed {
+  grid-template-rows: 0fr;
+}
+.node-collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+.node-collapse-wrapper.collapsed .react-flow__handle {
+  opacity: 0;
+  transition: opacity 100ms;
+}
+
+/* ========================================================================
+   UTILITY
+   ======================================================================== */
 .no-spinners::-webkit-inner-spin-button,
 .no-spinners::-webkit-outer-spin-button {
   -webkit-appearance: none;
   margin: 0;
-}
-
-/* 自定义滚动条 */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: #1a1a1a;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #444;
-  border-radius: 4px;
-  border: 2px solid #1a1a1a;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: #666;
-}
-
-/* 定义流动动画关键帧 */
-@keyframes dashdraw {
-  from {
-    stroke-dashoffset: 20;
-  }
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-.react-flow__edge.animated path {
-  stroke: #3b82f6 !important;
-  stroke-width: 3px !important;
-  stroke-dasharray: 10;
-  animation: dashdraw 0.5s linear infinite !important;
-  opacity: 1 !important;
-}
-
-/* 节点运行时的呼吸效果 */
-.node-running-pulse {
-  animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
-}
-
-@keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
-  70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
-}
-
-.react-flow__handle.connecting {
-  width: 12px !important;
-  height: 12px !important;
-  transition: all 0.2s;
-  background-color: #aaa;
-}
-
-.react-flow__handle.connecting:hover {
-  background-color: #22c55e !important;
-  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.4);
-  transform: scale(1.2);
-}
-
-@keyframes shimmer {
-  0% { transform: translateX(-150%); }
-  100% { transform: translateX(250%); }
-}
-
-.animate-shimmer {
-  animation: shimmer 1.5s infinite linear;
-}
-
-
-@keyframes shimmer {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(200%); }
-}
-
-.animate-shimmer {
-  animation: shimmer 1.5s infinite linear;
-}
-
-
-.node-running-pulse {
-  animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
-  border-color: #3b82f6 !important;
-}
-
-@keyframes pulse-ring {
-  0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4); }
-  70% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
-}
-
-/* === 节点折叠动画核心 === */
-.node-collapse-wrapper {
-  display: grid;
-  grid-template-rows: 1fr;
-  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.node-collapse-wrapper.collapsed {
-  grid-template-rows: 0fr;
-}
-
-.node-collapse-inner {
-  overflow: hidden;
-  min-height: 0; /* 必须设置，否则 grid 0fr 无效 */
-}
-
-/* 确保 Handle 在折叠时依然保留位置占位，但不显示多余 UI */
-.node-collapse-wrapper.collapsed .react-flow__handle {
-  opacity: 0; /* 折叠时隐藏 Handle 的小圆点，但保留 DOM */
-  transition: opacity 0.1s;
 }

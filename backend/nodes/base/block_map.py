@@ -1,15 +1,14 @@
 """
-BaseBlockMapNode: Abstract base for BlockMap pattern nodes.
+BaseBlockMapNode: BlockMap 模式节点的抽象基类。
 
-BlockMap pattern: input is a Dask Array, each block is processed independently,
-output is still a regular Dask Array, node stays lazy.
+BlockMap 模式：输入为 Dask Array，每个 block 独立处理，输出仍为常规 Dask Array，节点保持 lazy 特性。
 
-Design principles:
-- node author only writes process_block (single block algorithm)
-- Base handles: map_blocks wrapping, runtime injection, skip/failure/progress, dtype/meta
-- device_hint is resolved at execution time (on worker), not at graph-building time
-- safe defaults: SKIP_EMPTY_BLOCKS=True, SKIP_ALL_ZERO_BLOCKS=False, FAILURE_POLICY="raise"
-- output shape contract: result.ndim == block.ndim and result.shape == block.shape by default
+设计原则：
+- 节点作者只需编写 process_block（单 block 算法逻辑）
+- Base 负责处理：map_blocks 包装、运行时注入、跳过/失败/进度、dtype/meta
+- device_hint 在执行时（在 worker 上）解析，而非图构建时
+- 安全默认值：SKIP_EMPTY_BLOCKS=True, SKIP_ALL_ZERO_BLOCKS=False, FAILURE_POLICY="raise"
+- 输出 shape 约定：result.ndim == block.ndim 且 result.shape == block.shape（默认）
 """
 
 import numpy as np
@@ -23,76 +22,76 @@ from utils.progress_helper import report_progress
 
 class BaseBlockMapNode(ABC):
     """
-    BlockMap node abstract base class.
+    BlockMap 节点抽象基类。
 
-    Applicable scope:
-    - Input: single regular Dask Array
-    - Each block processed independently (no cross-block dependencies)
-    - Suitable for map_blocks
-    - Output: regular Dask Array (same shape/chunks as input, by default)
-    - Node stays lazy (execute() only builds graph, never calls compute)
+    适用场景：
+    - 输入：单个常规 Dask Array
+    - 每个 block 独立处理（无跨 block 依赖）
+    - 适用于 map_blocks
+    - 输出：常规 Dask Array（默认与输入 shape/chunks 相同）
+    - 节点保持 lazy 特性（execute() 只构建图，不调用 compute）
 
-    Node author only needs to implement:
-    1. INPUT_TYPES (class method)
-    2. process_block(block, block_info, params, runtime) -> np.ndarray (abstract method)
+    节点作者只需实现：
+    1. INPUT_TYPES（类方法）
+    2. process_block(block, block_info, params, runtime) -> np.ndarray（抽象方法）
     3. RETURN_TYPES, FUNCTION="execute"
 
-    Output shape contract (default, enforced by Base):
-    - process_block MUST return a np.ndarray
-    - result.ndim MUST equal block.ndim
-    - result.shape MUST equal block.shape
-    - This is the DEFAULT behavior (ALLOW_SHAPE_CHANGE=False).
-      Subclasses that intentionally produce shape-changing output can set
-      ALLOW_SHAPE_CHANGE=True and override validate_output_block() if needed.
+    输出 shape 约定（默认，由 Base 强制执行）：
+    - process_block 必须返回 np.ndarray
+    - result.ndim 必须等于 block.ndim
+    - result.shape 必须等于 block.shape
+    - 这是默认行为（ALLOW_SHAPE_CHANGE=False）。
+      如果子类故意产生 shape 变化的输出，可设置 ALLOW_SHAPE_CHANGE=True，
+      并在需要时覆盖 validate_output_block()。
 
-    Optional overrides:
-    - OUTPUT_DTYPE: explicit output dtype (default: input array's dtype)
-    - SKIP_EMPTY_BLOCKS: skip size==0 blocks (default: True)
-    - SKIP_ALL_ZERO_BLOCKS: skip all-zero blocks (default: False, opt-in)
-    - FAILURE_POLICY: "raise" (default) or "zeros_like"
-    - ALLOW_SHAPE_CHANGE: if True, skip shape validation (default: False)
-    - should_skip_block(block, block_info, params, runtime) -> bool: custom skip logic
-      (supports legacy single-arg signature for backward compatibility)
-    - validate_output_block(result, block) -> None: override for custom validation
+    可选覆盖：
+    - OUTPUT_DTYPE：显式指定输出 dtype（默认：输入数组的 dtype）
+    - SKIP_EMPTY_BLOCKS：跳过 size==0 的 blocks（默认：True）
+    - SKIP_ALL_ZERO_BLOCKS：跳过全零 blocks（默认：False，需主动开启）
+    - FAILURE_POLICY："raise"（默认）或 "zeros_like"
+    - ALLOW_SHAPE_CHANGE：为 True 时跳过 shape 验证（默认：False）
+    - should_skip_block(block, block_info, params, runtime) -> bool：自定义跳过逻辑
+      （为兼容旧版也支持单参数签名）
+    - validate_output_block(result, block) -> None：自定义验证逻辑
 
-    NOT in scope (this base):
-    - halo / map_overlap / cross-block dependencies
-    - Array -> Table / irregular output
-    - global convergence nodes (like DaskStats)
-    - sink / writer nodes
-    - node-internal rechunking
+    不在当前范畴（由其他 Base 处理）：
+    - halo / map_overlap / 跨 block 依赖
+    - Array -> Table / 不规则输出
+    - 全局收敛节点（如 DaskStats）
+    - sink / writer 节点
+    - 节点内部 rechunking
     """
 
-    # ---------- Node protocol (subclass MUST define) ----------
+    # ---------- 节点协议（子类必须定义）----------
     # INPUT_TYPES = {...}
     # RETURN_TYPES = (...)
     # FUNCTION = "execute"
 
-    # ---------- Default behavior (usually safe to keep) ----------
+    # ---------- 默认行为（通常保持即可）----------
     CATEGORY = "BrainFlow/BlockMap"
     DISPLAY_NAME = "BlockMap Node"
     PROGRESS_TYPE = ProgressType.CHUNK_COUNT
 
-    # Skip strategy
-    SKIP_EMPTY_BLOCKS = True        # Safe default: size==0 blocks have no data
-    SKIP_ALL_ZERO_BLOCKS = False   # Unsafe as default: many algorithms should process zeros normally
+    # 跳过策略
+    SKIP_EMPTY_BLOCKS = True        # 安全默认值：size==0 的 blocks 无数据
+    SKIP_ALL_ZERO_BLOCKS = False   # 非安全默认值：许多算法应正常处理零值
 
-    # Failure strategy
-    # "raise": exceptions propagate up (safe default for generic nodes)
-    # "zeros_like": exception -> return zeros_like(block), report "failed"
+    # 失败策略
+    # "raise": 异常向上传播（通用节点的安全默认值）
+    # "zeros_like": 异常 -> 返回 zeros_like(block)，报告 "failed"
     FAILURE_POLICY = "raise"
 
-    # Output shape contract
-    # False = enforce result.ndim == block.ndim and result.shape == block.shape
-    # True = skip shape validation (for nodes that intentionally change shape)
+    # 输出 shape 约定
+    # False = 强制 result.ndim == block.ndim 且 result.shape == block.shape
+    # True = 跳过 shape 验证（适用于故意改变 shape 的节点）
     ALLOW_SHAPE_CHANGE = False
 
-    # Output dtype
-    # None = use input array's dtype
-    # Set to specific dtype to override
+    # 输出 dtype
+    # None = 使用输入数组的 dtype
+    # 设置特定 dtype 以覆盖
     OUTPUT_DTYPE = None
 
-    # ---------- Abstract method (subclass MUST implement) ----------
+    # ---------- 抽象方法（子类必须实现）----------
 
     @abstractmethod
     def process_block(
@@ -103,73 +102,73 @@ class BaseBlockMapNode(ABC):
         runtime: dict,
     ) -> np.ndarray:
         """
-        Single block processing algorithm. Implemented by subclass.
+        单个 block 处理算法。由子类实现。
 
-        Parameters
+        参数
         ----------
         block : np.ndarray
-            Current chunk's numpy data (not dask array).
-            Note: empty blocks (size==0) may be skipped (if SKIP_EMPTY_BLOCKS=True)
-            before this is called. But ALL-ZERO blocks are NOT auto-skipped
-            unless SKIP_ALL_ZERO_BLOCKS=True.
+            当前 chunk 的 numpy 数据（非 dask array）。
+            注意：空 blocks（size==0）可能会被跳过（如果 SKIP_EMPTY_BLOCKS=True）
+            然后再调用本方法。但全零 blocks 不会自动跳过，
+            除非 SKIP_ALL_ZERO_BLOCKS=True。
         block_info : dict
-            Block metadata injected by Dask at execution time. Standard fields:
+            Dask 在执行时注入的 block 元数据。标准字段：
             - "shape": chunk shape
-            - "chunk-location": block index in original array
-            - "dtype": data type
-            Other Dask map_blocks standard fields may be present.
-            Can be used for spatial-aware processing if needed.
+            - "chunk-location": block 在原始数组中的索引
+            - "dtype": 数据类型
+            其他 Dask map_blocks 标准字段也可能存在。
+            如需要可用于空间感知处理。
         params : dict
-            Node's configured parameters (from INPUT_TYPES).
-            Does NOT contain framework internal fields like _node_id, _execution_id.
+            节点配置参数（来自 INPUT_TYPES）。
+            不包含框架内部字段如 _node_id、_execution_id。
         runtime : dict
-            Runtime context containing:
-            - "node_id": node ID (for progress reporting)
-            - "execution_id": execution ID
-            - "device_hint": device string like "cuda:0" or "cpu"
-            Note: device_hint is resolved at execution time (on worker),
-            not at graph-building time (execute runs on client).
+            运行时上下文，包含：
+            - "node_id": 节点 ID（用于进度报告）
+            - "execution_id": 执行 ID
+            - "device_hint": 设备字符串，如 "cuda:0" 或 "cpu"
+            注意：device_hint 在执行时（在 worker 上）解析，
+            而非图构建时（execute 在客户端运行）。
 
-        Returns
+        返回
         -------
         np.ndarray
-            Processed block data. Must satisfy the output shape contract:
-            - Must be a np.ndarray
-            - result.ndim == block.ndim (unless ALLOW_SHAPE_CHANGE=True)
-            - result.shape == block.shape (unless ALLOW_SHAPE_CHANGE=True)
-            - The returned numpy array will be automatically assembled by map_blocks
-              into the output Dask Array. Do NOT return a dask array.
+            处理的 block 数据。必须满足输出 shape 约定：
+            - 必须是 np.ndarray
+            - result.ndim == block.ndim（除非 ALLOW_SHAPE_CHANGE=True）
+            - result.shape == block.shape（除非 ALLOW_SHAPE_CHANGE=True）
+            - 返回的 numpy 数组会被 map_blocks 自动组装成输出 Dask Array。
+              不要返回 dask array。
         """
         ...
 
-    # ---------- execute (system calls, node author does not override) ----------
+    # ---------- execute（系统调用，节点作者无需覆盖）----------
 
     def execute(self, dask_arr, **kwargs) -> Tuple:
         """
-        Build map_blocks lazy graph.
+        构建 map_blocks 惰性图。
 
-        This method is called by the executor during graph-building phase.
-        It returns a lazy Dask Array (does NOT call compute).
+        此方法由执行器在图构建阶段调用。
+        返回一个惰性 Dask Array（不调用 compute）。
         """
         node_id = kwargs.get("_node_id")
         execution_id = kwargs.get("_execution_id")
 
-        # Build static runtime (determinable at graph-building time)
+        # 构建静态运行时（在图构建时可确定）
         static_runtime = {
             "node_id": node_id,
             "execution_id": execution_id,
         }
 
-        # Extract node parameters (filter out framework internal fields)
+        # 提取节点参数（过滤框架内部字段）
         params = self._extract_params(kwargs)
 
-        # Determine output dtype
+        # 确定输出 dtype
         output_dtype = self._resolve_output_dtype(dask_arr.dtype, params)
 
-        # Build meta for map_blocks
+        # 为 map_blocks 构建 meta
         meta = self._build_meta(output_dtype)
 
-        # Create wrapped function (adds skip/failure/progress/validation logic)
+        # 创建包装函数（添加跳过/失败/进度/验证逻辑）
         wrapped_fn = self._make_wrapped_function(
             static_runtime=static_runtime,
             params=params,
@@ -182,10 +181,10 @@ class BaseBlockMapNode(ABC):
         node_cls_name = type(self).__name__
         map_blocks_name = f"{node_cls_name}_{node_id}" if node_id else node_cls_name
 
-        # Call map_blocks
-        # Note: we do NOT pass block_info as a kwarg.
-        # Dask injects block_info via function signature at execution time.
-        # The wrapped function accepts block_info as an optional positional arg.
+        # 调用 map_blocks
+        # 注意：我们不把 block_info 作为 kwarg 传递。
+        # Dask 通过函数签名在执行时注入 block_info。
+        # 包装函数接受 block_info 作为可选的位置参数。
         result = dask_arr.map_blocks(
             wrapped_fn,
             dtype=output_dtype,
@@ -207,15 +206,15 @@ class BaseBlockMapNode(ABC):
 
         return (result,)
 
-    # ---------- Internal methods ----------
+    # ---------- 内部方法 ----------
 
     def _extract_params(self, kwargs) -> Dict[str, Any]:
-        """Extract node's configurable parameters, filtering framework internal fields."""
+        """提取节点可配置参数，过滤框架内部字段。"""
         framework_keys = {"_node_id", "_execution_id", "dask_arr"}
         return {k: v for k, v in kwargs.items() if k not in framework_keys}
 
     def _resolve_output_dtype(self, input_dtype, params) -> np.dtype:
-        """Resolve output dtype. Priority: OUTPUT_DTYPE > infer_output_dtype > input_dtype."""
+        """解析输出 dtype。优先级：OUTPUT_DTYPE > infer_output_dtype > input_dtype。"""
         if self.OUTPUT_DTYPE is not None:
             return self.OUTPUT_DTYPE
         if hasattr(self, "infer_output_dtype"):
@@ -223,23 +222,22 @@ class BaseBlockMapNode(ABC):
         return input_dtype
 
     def _build_meta(self, dtype) -> np.ndarray:
-        """Build meta array for map_blocks (empty array with correct dtype)."""
+        """为 map_blocks 构建 meta 数组（具有正确 dtype 的空数组）。"""
         return np.array((), dtype=dtype)
 
-    # ---------- Output shape contract ----------
+    # ---------- 输出 shape 约定 ----------
 
     def _validate_output_block(self, result: np.ndarray, block: np.ndarray) -> None:
         """
-        Validate that process_block output satisfies the shape contract.
+        验证 process_block 输出是否满足 shape 约定。
 
-        Default contract (when ALLOW_SHAPE_CHANGE=False):
-        - result must be a np.ndarray
+        默认约定（当 ALLOW_SHAPE_CHANGE=False 时）：
+        - result 必须是 np.ndarray
         - result.ndim == block.ndim
         - result.shape == block.shape
 
-        Raises ValueError with a clear message if the contract is violated.
-        Subclasses can override this to customize validation, but should
-        generally not relax the default contract without good reason.
+        如果违反约定，抛出带清晰消息的 ValueError。
+        子类可以覆盖此方法自定义验证逻辑，但一般不应随意放宽默认约定。
         """
         if not isinstance(result, np.ndarray):
             raise ValueError(
@@ -265,37 +263,37 @@ class BaseBlockMapNode(ABC):
                 f"Set ALLOW_SHAPE_CHANGE=True if intentional shape-changing is required."
             )
 
-    # ---------- Skip logic ----------
+    # ---------- 跳过逻辑 ----------
 
     def _should_skip(self, block: np.ndarray, block_info: dict, params: dict, runtime: dict) -> bool:
         """
-        Determine if block should be skipped.
+        判断 block 是否应该被跳过。
 
-        Skip decision order:
-        1. SKIP_EMPTY_BLOCKS: if block.size == 0
-        2. SKIP_ALL_ZERO_BLOCKS: if np.all(block == 0)
-        3. should_skip_block(...): custom node-defined skip logic (if provided)
+        跳过决策顺序：
+        1. SKIP_EMPTY_BLOCKS：block.size == 0
+        2. SKIP_ALL_ZERO_BLOCKS：np.all(block == 0)
+        3. should_skip_block(...)：自定义节点定义的跳过逻辑（如果有）
 
-        Parameters
+        参数
         ----------
         block : np.ndarray
-        block_info : dict (injected by Dask at execution time)
-        params : dict (node parameters)
-        runtime : dict (node_id, execution_id, device_hint)
+        block_info : dict（Dask 在执行时注入）
+        params : dict（节点参数）
+        runtime : dict（node_id, execution_id, device_hint）
 
-        Returns
+        返回
         -------
-        bool: True if block should be skipped
+        bool: True 表示 block 应该被跳过
         """
-        # 1. Empty block skip (always safe)
+        # 1. 空 block 跳过（始终安全）
         if self.SKIP_EMPTY_BLOCKS and block.size == 0:
             return True
 
-        # 2. All-zero block skip (opt-in)
+        # 2. 全零 block 跳过（需主动开启）
         if self.SKIP_ALL_ZERO_BLOCKS and np.all(block == 0):
             return True
 
-        # 3. Custom skip hook — supports both new full-signature and legacy single-arg
+        # 3. 自定义跳过钩子 — 同时支持新版全参数签名和旧版单参数签名
         custom_skip = getattr(self, "should_skip_block", None)
         if custom_skip is not None:
             sig = getattr(inspect, "signature", None)
@@ -309,19 +307,19 @@ class BaseBlockMapNode(ABC):
                     elif len(params_sig) == 1:
                         return custom_skip(block)
                     else:
-                        # Ambiguous signature — try new first, fall back to legacy
+                        # 签名不明确 — 优先尝试新版，失败则回退到旧版
                         try:
                             return custom_skip(block, block_info, params, runtime)
                         except TypeError:
                             return custom_skip(block)
                 except (ValueError, TypeError):
-                    # inspect.signature can fail on builtins — try new signature first
+                    # inspect.signature 在内置函数上可能失败 — 优先尝试新版签名
                     try:
                         return custom_skip(block, block_info, params, runtime)
                     except TypeError:
                         return custom_skip(block)
             else:
-                # inspect.signature not available — assume new signature
+                # inspect.signature 不可用 — 假设新版签名
                 try:
                     return custom_skip(block, block_info, params, runtime)
                 except TypeError:
@@ -331,9 +329,9 @@ class BaseBlockMapNode(ABC):
 
     def _resolve_device_hint(self) -> str:
         """
-        Resolve device hint at execution time (on worker).
+        在执行时（在 worker 上）解析 device hint。
 
-        Called inside wrapped function, not in execute() (which runs on client).
+        在包装函数内部调用，而非在 execute() 中（execute 在客户端运行）。
         """
         try:
             from distributed import get_worker
@@ -344,26 +342,26 @@ class BaseBlockMapNode(ABC):
 
     def _make_wrapped_function(self, static_runtime: dict, params: dict, output_dtype: np.dtype, node_id: str = None):
         """
-        Wrap process_block with:
-        1. device_hint resolution (execution time)
-        2. runtime merging
-        3. skip logic (with full context: block, block_info, params, runtime)
-        4. output shape validation
-        5. failure handling
-        6. progress reporting
+        包装 process_block，添加：
+        1. device_hint 解析（执行时）
+        2. runtime 合并
+        3. 跳过逻辑（带完整上下文：block, block_info, params, runtime）
+        4. 输出 shape 验证
+        5. 失败处理
+        6. 进度报告
         """
-        skip_decider = self._should_skip  # bound method with full context
+        skip_decider = self._should_skip  # 绑定方法，带完整上下文
         failure_policy = self.FAILURE_POLICY
         validate_fn = self._validate_output_block
         validate_output_block_method = getattr(self, "validate_output_block", None)
         allow_shape_change = self.ALLOW_SHAPE_CHANGE
 
         def wrapped(block, block_info=None):
-            # block_info: injected by Dask at execution time via function signature
+            # block_info：通过函数签名由 Dask 在执行时注入
             block_info = block_info or {}
 
-            # ----- Resolve device_hint at execution time -----
-            # Priority: worker.assigned_gpu > torch.cuda.is_available() > "cpu"
+            # ----- 在执行时解析 device_hint -----
+            # 优先级：worker.assigned_gpu > torch.cuda.is_available() > "cpu"
             device_hint = "cpu"
             try:
                 from distributed import get_worker
@@ -384,13 +382,13 @@ class BaseBlockMapNode(ABC):
                 except Exception:
                     pass
 
-            # ----- Build full runtime -----
+            # ----- 构建完整 runtime -----
             runtime = {
                 **static_runtime,
                 "device_hint": device_hint,
             }
 
-            # ----- Skip decision (with full context) -----
+            # ----- 跳过决策（带完整上下文）-----
             if skip_decider(block, block_info, params, runtime):
                 node_id = static_runtime.get("node_id")
                 execution_id = static_runtime.get("execution_id")
@@ -398,13 +396,13 @@ class BaseBlockMapNode(ABC):
                     report_progress(node_id, execution_id=execution_id, chunk_type="skipped")
                 return np.zeros_like(block, dtype=output_dtype)
 
-            # ----- Call process_block -----
+            # ----- 调用 process_block -----
             if failure_policy == "zeros_like":
                 try:
                     result = self.process_block(block, block_info, params, runtime)
 
-                    # ----- Output shape contract validation -----
-                    # Use node's own validate_output_block if overridden, otherwise Base default
+                    # ----- 输出 shape 约定验证 -----
+                    # 如果子类覆盖了 validate_output_block，则使用子类的；否则使用 Base 的默认验证
                     if validate_output_block_method is not None and validate_output_block_method is not BaseBlockMapNode._validate_output_block:
                         validate_output_block_method(result, block)
                     else:
@@ -426,10 +424,10 @@ class BaseBlockMapNode(ABC):
                         report_progress(node_id, execution_id=execution_id, chunk_type="failed")
                     return np.zeros_like(block, dtype=output_dtype)
             else:
-                # "raise" policy: exceptions propagate
+                # "raise" 策略：异常向上传播
                 result = self.process_block(block, block_info, params, runtime)
 
-                # ----- Output shape contract validation -----
+                # ----- 输出 shape 约定验证 -----
                 if validate_output_block_method is not None and validate_output_block_method is not BaseBlockMapNode._validate_output_block:
                     validate_output_block_method(result, block)
                 else:

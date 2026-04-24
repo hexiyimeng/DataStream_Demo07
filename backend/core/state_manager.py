@@ -318,8 +318,8 @@ class GlobalStateManager:
             "type": "execution_snapshot",
             "executionId": execution_id,
             "status": session.status,
-            "createdAt": session.created_at,
-            "finishedAt": session.finished_at,
+            "createdAt": session.created_at * 1000,  # milliseconds for JS Date
+            "finishedAt": session.finished_at * 1000 if session.finished_at else None,
             "nodeCount": len(session.node_states),
             "logCount": len(session.logs),
             "totalChunks": total_chunks,
@@ -355,36 +355,29 @@ class GlobalStateManager:
 
             # 2. 同步节点进度状态（包含完整运行态字段）
             for node_id, state in session.node_states.items():
+                # 过滤小于 0 的 progress 值，-1 应该是 None
+                raw_progress = state.get('progress')
+                safe_progress = None if (raw_progress is None or raw_progress < 0) else raw_progress
+
                 if websocket.client_state == WebSocketState.CONNECTED:
                     sync_msg = {
                         "type": "progress",
                         "taskId": node_id,
                         "executionId": execution_id,
                         "progressType": state.get('progressType'),
-                        "progress": state['progress'],
+                        "progress": safe_progress,
                         "message": state['message'],
+                        "runState": state.get('runState'),
+                        "device": state.get('device'),
+                        "waitingFor": state.get('waitingFor'),
+                        "progressRole": state.get('progressRole'),
+                        "totalChunks": state.get('totalChunks'),
+                        "processedChunks": state.get('processedChunks'),
+                        "completedInferenceChunks": state.get('completedInferenceChunks'),
+                        "skippedChunks": state.get('skippedChunks'),
+                        "failedChunks": state.get('failedChunks'),
                     }
-                    if 'runState' in state:
-                        sync_msg['runState'] = state['runState']
-                    if 'device' in state:
-                        sync_msg['device'] = state['device']
-                    if 'waitingFor' in state:
-                        sync_msg['waitingFor'] = state['waitingFor']
-                    if 'progressRole' in state:
-                        sync_msg['progressRole'] = state['progressRole']
-                    if 'totalChunks' in state:
-                        sync_msg['totalChunks'] = state['totalChunks']
-                    if 'processedChunks' in state:
-                        sync_msg['processedChunks'] = state['processedChunks']
-                    if 'completedInferenceChunks' in state:
-                        sync_msg['completedInferenceChunks'] = state['completedInferenceChunks']
-                    if 'skippedChunks' in state:
-                        sync_msg['skippedChunks'] = state['skippedChunks']
-                    if 'failedChunks' in state:
-                        sync_msg['failedChunks'] = state['failedChunks']
                     await websocket.send_json(sync_msg)
-                else:
-                    return
         except Exception as e:
             logger.debug(f"[StateManager] Sync interrupted: {e}")
             self.unsubscribe_client(websocket)

@@ -187,25 +187,3 @@ def create_progress_callback(node_id: str, execution_id: Optional[str] = None):
         report_progress(node_id, execution_id=execution_id)
         return chunk
     return _callback
-
-
-# =============================================================================
-# 遗留兼容
-# =============================================================================
-def report_progress_legacy(node_id: Optional[str]) -> bool:
-    """遗留的 Pub 方式进度报告（已废弃）"""
-    if not node_id:
-        return False
-
-    try:
-        try:
-            from distributed import Pub
-        except ImportError:
-            from dask.distributed import Pub
-
-        pub = Pub(f"progress_{node_id}")
-        pub.put("1")
-        return True
-    except Exception as e:
-        logger.debug(f"[ProgressHelper] Legacy progress report failed for node {node_id}: {e}")
-        return False

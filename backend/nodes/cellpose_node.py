@@ -435,7 +435,8 @@ class DaskCellpose(BaseBlockMapNode):
         masks = None
         flows = None
         styles = None
-
+        #TODO=========================
+        #result = process(block, **params)
         try:
             # 构造 eval 参数
             eval_kwargs: dict = {
@@ -468,6 +469,7 @@ class DaskCellpose(BaseBlockMapNode):
             masks, flows, styles = model.eval(block, **eval_kwargs)
 
             return masks.astype(np.uint16)
+            #return result.astype(type(RETURN_TYPES[0]))
 
         finally:
             # 释放模型（减少引用计数；不触发 GPU 同步/清缓存）

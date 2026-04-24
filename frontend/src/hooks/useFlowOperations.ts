@@ -9,12 +9,14 @@ export const useFlowOperations = (
   setEdges: React.Dispatch<React.SetStateAction<Edge[]>>,
   undo: () => void,
   redo: () => void,
-  addLog: (msg: string, type?: LogEntry['type']) => void
+  addLog: (msg: string, type?: LogEntry['type']) => void,
+  isExecutionLocked: boolean = false
 ) => {
   const clipboardRef = useRef<{ nodes: Node<NodeData>[], edges: Edge[] } | null>(null);
 
   // === 复制 ===
   const handleCopy = useCallback(() => {
+    if (isExecutionLocked) return;
     const selectedNodes = nodes.filter(n => n.selected);
     if (selectedNodes.length === 0) return;
     const selectedIds = new Set(selectedNodes.map(n => n.id));
@@ -23,10 +25,11 @@ export const useFlowOperations = (
 
     clipboardRef.current = { nodes: selectedNodes, edges: selectedEdges };
     addLog(`Copied ${selectedNodes.length} nodes`, 'info');
-  }, [nodes, edges, addLog]);
+  }, [nodes, edges, addLog, isExecutionLocked]);
 
   // === 粘贴 ===
   const handlePaste = useCallback(() => {
+    if (isExecutionLocked) return;
     if (!clipboardRef.current) return;
     const { nodes: cpNodes, edges: cpEdges } = clipboardRef.current;
 
@@ -72,17 +75,18 @@ export const useFlowOperations = (
     setNodes(nds => nds.map(n => ({ ...n, selected: false } as Node<NodeData>)).concat(newNodes));
     setEdges(eds => eds.map(e => ({ ...e, selected: false } as Edge)).concat(newEdges));
     addLog(`Pasted ${newNodes.length} nodes`, 'info');
-  }, [setNodes, setEdges, addLog]);
+  }, [setNodes, setEdges, addLog, isExecutionLocked]);
 
   // === 删除 ===
   const handleDelete = useCallback(() => {
+    if (isExecutionLocked) return;
       const selectedNodes = nodes.filter(n => n.selected);
       const selectedEdges = edges.filter(e => e.selected);
       if (selectedNodes.length === 0 && selectedEdges.length === 0) return;
 
       setNodes(nds => nds.filter(n => !n.selected));
       setEdges(eds => eds.filter(e => !e.selected));
-  }, [nodes, edges, setNodes, setEdges]);
+  }, [nodes, edges, setNodes, setEdges, isExecutionLocked]);
 
   // === 快捷键监听 ===
   useEffect(() => {
@@ -93,6 +97,8 @@ export const useFlowOperations = (
 
       const isCtrl = e.metaKey || e.ctrlKey;
 
+      if (isExecutionLocked) return; // 运行中禁止快捷键操作
+
       if (isCtrl && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
       else if (isCtrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
       else if (isCtrl && e.key.toLowerCase() === 'c') { e.preventDefault(); handleCopy(); }
@@ -101,7 +107,7 @@ export const useFlowOperations = (
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undo, redo, handleCopy, handlePaste, handleDelete]);
+  }, [undo, redo, handleCopy, handlePaste, handleDelete, isExecutionLocked]);
 
   return { handleCopy, handlePaste, handleDelete };
 };
