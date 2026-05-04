@@ -4,6 +4,7 @@ import type { NodeData } from '../types';
 import { useFlow } from '../hooks/useFlowContext';
 import { createPortal } from 'react-dom';
 import { Pill } from './ui/Pill';
+import { parsePortType, resolveNodeOutputTypes } from '../utils/portTypes';
 
 // === Handle type color registry ===
 const TYPE_COLORS: Record<string, string> = {
@@ -15,14 +16,21 @@ const TYPE_COLORS: Record<string, string> = {
   DATA_STREAM: '#a78bfa',
   METADATA: '#fb7185',
   DASK_ARRAY: '#22d3ee',
+  MODEL: '#f59e0b',
   default: '#6b7280',
 };
 
-// Category → accent strip color (low saturation)
+function getTypeColor(type: string): string {
+  const parsed = parsePortType(type);
+  return TYPE_COLORS[type] ?? TYPE_COLORS[parsed.container] ?? TYPE_COLORS.default;
+}
+
+// Category → accent strip color
 const CATEGORY_COLORS: Record<string, string> = {
   'BrainFlow/IO': '#22c55e',
   'BrainFlow/Processing': '#3b82f6',
   'BrainFlow/Segmentation': '#f59e0b',
+  'BrainFlow/Models': '#f59e0b',
   'BrainFlow/Output': '#a78bfa',
   'Image': '#3b82f6',
   'Loader': '#22c55e',
@@ -42,25 +50,13 @@ function getCategoryAccent(category?: string): string {
 type NodeStatus = 'idle' | 'ready' | 'submitted' | 'running' | 'done' | 'failed' | 'cancelled' | 'error';
 
 const STATUS_PILL_VARIANT: Record<NodeStatus, 'idle' | 'info' | 'running' | 'success' | 'danger' | 'warning' | 'muted'> = {
-  idle: 'idle',
-  ready: 'info',
-  submitted: 'info',
-  running: 'running',
-  done: 'success',
-  failed: 'danger',
-  cancelled: 'warning',
-  error: 'danger',
+  idle: 'idle', ready: 'info', submitted: 'info', running: 'running',
+  done: 'success', failed: 'danger', cancelled: 'warning', error: 'danger',
 };
 
 const STATUS_LABEL: Record<NodeStatus, string> = {
-  idle: '',
-  ready: 'Ready',
-  submitted: 'Queued',
-  running: 'Running',
-  done: 'Done',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-  error: 'Error',
+  idle: '', ready: 'Ready', submitted: 'Queued', running: 'Running',
+  done: 'Done', failed: 'Failed', cancelled: 'Cancelled', error: 'Error',
 };
 
 // ==========================================
@@ -118,26 +114,11 @@ const ValuePopup = ({ initialValue, onSave, onClose, anchorRect }: ValuePopupPro
 };
 
 // ==========================================
-// 2. TypeBadge — small inline type label
-// ==========================================
-function TypeBadge({ type }: { type: string }) {
-  const color = TYPE_COLORS[type] ?? TYPE_COLORS.default;
-  return (
-    <span
-      className="text-[9px] font-mono px-1 py-px rounded-full uppercase tracking-wider font-bold"
-      style={{ color, backgroundColor: `${color}18`, border: `1px solid ${color}30` }}
-    >
-      {type}
-    </span>
-  );
-}
-
-// ==========================================
-// 3. ControlWidget
+// 2. ControlWidget
 // ==========================================
 interface ControlWidgetProps {
   name: string;
-  config: [string, Record<string, unknown>?];
+  config: [string | string[], Record<string, unknown>?];
   value: unknown;
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
@@ -157,9 +138,9 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
     return (
       <div
         className={[
-          'nodrag group flex items-center justify-between',
+          'nodrag group flex items-center justify-between gap-2',
           'bg-[var(--color-bg-field)] hover:bg-[var(--color-bg-field-hover)]',
-          'rounded-[var(--radius-sm)] px-2 h-7 mb-[2px]',
+          'rounded-[var(--radius-sm)] px-2 h-6 mb-[2px]',
           'border border-transparent hover:border-[var(--color-border-subtle)]',
           'transition-all duration-[var(--motion-fast)] select-none',
           disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer',
@@ -167,18 +148,18 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
         onClick={disabled ? undefined : () => onChange(name, !boolVal)}
         onDoubleClick={stopProp}
       >
-        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate max-w-[55%]">{name}</span>
+        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate">{name}</span>
         <div
           className={[
-            'relative w-8 h-4 rounded-full transition-colors duration-200 shrink-0',
+            'relative w-7 h-3.5 rounded-full transition-colors duration-200 shrink-0',
             boolVal ? 'bg-[var(--color-accent)]' : 'bg-[var(--color-border-default)]',
           ].join(' ')}
         >
           <div
             className={[
-              'absolute top-[2px] left-[2px] w-3 h-3 bg-white rounded-full shadow-sm',
+              'absolute top-[2px] left-[2px] w-2.5 h-2.5 bg-white rounded-full shadow-sm',
               'transition-transform duration-200',
-              boolVal ? 'translate-x-4' : 'translate-x-0',
+              boolVal ? 'translate-x-3.5' : 'translate-x-0',
             ].join(' ')}
           />
         </div>
@@ -194,9 +175,9 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
         <div
           ref={containerRef}
           className={[
-            'nodrag group flex items-center justify-between',
+            'nodrag group flex items-center justify-between gap-2',
             'bg-[var(--color-bg-field)] hover:bg-[var(--color-bg-field-hover)]',
-            'rounded-[var(--radius-sm)] px-2 h-7 mb-[2px]',
+            'rounded-[var(--radius-sm)] px-2 h-6 mb-[2px]',
             'border border-transparent hover:border-[var(--color-border-subtle)]',
             'transition-all duration-[var(--motion-fast)] select-none',
             disabled ? '' : 'cursor-pointer',
@@ -204,15 +185,13 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
           onClick={disabled ? stopProp : () => { setAnchorRect(containerRef.current?.getBoundingClientRect() ?? null); setShowPopup(true); }}
           onDoubleClick={stopProp}
         >
-          <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate max-w-[55%]">{name}</span>
-          <div className="flex-1 min-w-0 flex items-center justify-end ml-2">
-            <span className={[
-              'text-[11px] font-mono text-right truncate max-w-[120px]',
-              displayStr ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-muted)] italic',
-            ].join(' ')}>
-              {displayStr || '—'}
-            </span>
-          </div>
+          <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate">{name}</span>
+          <span className={[
+            'text-[11px] font-mono text-right truncate max-w-[60%]',
+            displayStr ? 'text-[var(--color-text-primary)]' : 'text-[var(--color-text-muted)] italic',
+          ].join(' ')}>
+            {displayStr || '—'}
+          </span>
         </div>
         {showPopup && !disabled && (
           <ValuePopup
@@ -247,19 +226,19 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
     return (
       <div
         className={[
-          'nodrag flex items-center justify-between',
+          'nodrag flex items-center justify-between gap-2',
           'bg-[var(--color-bg-field)] hover:bg-[var(--color-bg-field-hover)]',
-          'rounded-[var(--radius-sm)] px-2 h-7 mb-[2px]',
+          'rounded-[var(--radius-sm)] px-2 h-6 mb-[2px]',
           'border border-transparent hover:border-[var(--color-border-subtle)]',
           'transition-all duration-[var(--motion-fast)] select-none',
         ].join(' ')}
         onDoubleClick={stopProp}
       >
-        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate max-w-[55%]">{name}</span>
-        <div className="flex items-center gap-0.5 shrink-0">
+        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate shrink-0">{name}</span>
+        <div className="flex items-center gap-0.5">
           <button
             className={[
-              'w-5 h-5 rounded flex items-center justify-center',
+              'w-4 h-4 rounded flex items-center justify-center shrink-0',
               'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-surface-3)]',
               'transition-colors duration-[var(--motion-fast)]',
               disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer',
@@ -267,35 +246,33 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
             onClick={disabled ? undefined : (e) => { e.stopPropagation(); stepVal(-1, e.shiftKey); }}
             disabled={disabled}
           >
-            <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+            <svg className="w-2 h-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14" />
             </svg>
           </button>
-          <div className={[
-            'w-[68px] h-[22px] flex items-center justify-center',
-            'bg-[var(--color-bg-surface)] rounded-[var(--radius-sm)]',
-            'border border-[var(--color-border-subtle)]',
-            'focus-within:border-[var(--color-border-focus)]',
-            'transition-colors duration-[var(--motion-fast)]',
-          ].join(' ')}>
-            <input
-              type="number"
-              className="w-full h-full text-[11px] text-center font-mono text-[var(--color-text-primary)] bg-transparent outline-none border-none no-spinners"
-              value={val}
-              disabled={disabled}
-              onChange={e => {
-                let v = Number(e.target.value);
-                if (!isFloat) v = Math.round(v);
-                onChange(name, v);
-              }}
-              step={step}
-              onPointerDown={stopProp}
-              onKeyDown={stopPropKey}
-            />
-          </div>
+          <input
+            type="number"
+            className={[
+              'w-full min-w-0 h-5 text-[11px] text-center font-mono text-[var(--color-text-primary)]',
+              'bg-[var(--color-bg-surface)] rounded-[var(--radius-sm)]',
+              'border border-[var(--color-border-subtle)]',
+              'focus:border-[var(--color-border-focus)] outline-none no-spinners',
+              'transition-colors duration-[var(--motion-fast)] px-1',
+            ].join(' ')}
+            value={val}
+            disabled={disabled}
+            onChange={e => {
+              let v = Number(e.target.value);
+              if (!isFloat) v = Math.round(v);
+              onChange(name, v);
+            }}
+            step={step}
+            onPointerDown={stopProp}
+            onKeyDown={stopPropKey}
+          />
           <button
             className={[
-              'w-5 h-5 rounded flex items-center justify-center',
+              'w-4 h-4 rounded flex items-center justify-center shrink-0',
               'text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-surface-3)]',
               'transition-colors duration-[var(--motion-fast)]',
               disabled ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer',
@@ -303,7 +280,7 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
             onClick={disabled ? undefined : (e) => { e.stopPropagation(); stepVal(1, e.shiftKey); }}
             disabled={disabled}
           >
-            <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
+            <svg className="w-2 h-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" />
             </svg>
           </button>
@@ -317,37 +294,35 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
     return (
       <div
         className={[
-          'nodrag flex items-center justify-between',
+          'nodrag flex items-center justify-between gap-2',
           'bg-[var(--color-bg-field)] hover:bg-[var(--color-bg-field-hover)]',
-          'rounded-[var(--radius-sm)] px-2 h-7 mb-[2px]',
+          'rounded-[var(--radius-sm)] px-2 h-6 mb-[2px]',
           'border border-transparent hover:border-[var(--color-border-subtle)]',
           'transition-all duration-[var(--motion-fast)] select-none',
         ].join(' ')}
         onDoubleClick={stopProp}
       >
-        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate max-w-[55%]">{name}</span>
-        <div className="flex items-center gap-1 shrink-0 ml-2">
-          <div className={[
-            'bg-[var(--color-bg-surface)] rounded-[var(--radius-sm)] px-1.5 h-[22px]',
-            'border border-[var(--color-border-subtle)]',
-            'flex items-center gap-1',
-            'transition-colors duration-[var(--motion-fast)]',
-          ].join(' ')}>
-            <select
-              className="text-[11px] font-mono text-right text-[var(--color-text-primary)] bg-transparent outline-none border-none appearance-none cursor-pointer pr-1 max-w-[100px]"
-              value={String(value ?? type[0])}
-              onChange={e => onChange(name, e.target.value)}
-              onPointerDown={stopProp}
-              disabled={disabled}
-            >
-              {type.map((o: string) => (
-                <option key={o} value={o} className="bg-[var(--color-bg-surface)]">{o}</option>
-              ))}
-            </select>
-            <svg className="w-2.5 h-2.5 text-[var(--color-text-muted)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-            </svg>
-          </div>
+        <span className="text-[11px] text-[var(--color-text-secondary)] font-medium truncate shrink-0">{name}</span>
+        <div className={[
+          'bg-[var(--color-bg-surface)] rounded-[var(--radius-sm)] px-1.5 h-5',
+          'border border-[var(--color-border-subtle)]',
+          'flex items-center gap-1 shrink-0',
+          'transition-colors duration-[var(--motion-fast)]',
+        ].join(' ')}>
+          <select
+            className="text-[11px] font-mono text-right text-[var(--color-text-primary)] bg-transparent outline-none border-none appearance-none cursor-pointer pr-1 max-w-[100px]"
+            value={String(value ?? type[0])}
+            onChange={e => onChange(name, e.target.value)}
+            onPointerDown={stopProp}
+            disabled={disabled}
+          >
+            {type.map((o: string) => (
+              <option key={o} value={o} className="bg-[var(--color-bg-surface)]">{o}</option>
+            ))}
+          </select>
+          <svg className="w-2.5 h-2.5 text-[var(--color-text-muted)] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
         </div>
       </div>
     );
@@ -360,7 +335,7 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
 // 4. DynamicNode — main component
 // ==========================================
 const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
-  const { nodeSpec, values = {}, progress, message, _invalid, _warning, runState, waitingFor } = data || {};
+  const { nodeSpec, values = {}, progress, message, _invalid, _warning, runState, waitingFor, progressRole } = data || {};
   const { isExecutionLocked, updateNodeData } = useFlow();
   const locked = isExecutionLocked ?? false;
   const [collapsed, setCollapsed] = useState(false);
@@ -373,11 +348,12 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
 
   // --- Status ---
   const status: NodeStatus = runState ?? 'idle';
-  const progressType = nodeSpec?.progress_type || 'state_only';
   const progressValue = progress ?? 0;
-  const showPercentage = progressType === 'chunk_count' && progress !== null && !nodeSpec?.output_node;
+  // 只有 chunk_sink（Writer）和 stage_sink（DaskStats）这类终点节点才显示进度条
+  // chunk_intermediate（Cellpose 等中间节点）不显示进度条
+  const showPercentage = (progressRole === 'chunk_sink' || progressRole === 'stage_sink') && progress !== null;
 
-  const hasFooter = !collapsed && status !== 'idle' && status !== 'ready';
+  const hasFooter = status !== 'idle' && status !== 'ready';
   const accentColor = getCategoryAccent(nodeSpec?.category);
   const isOutputNode = nodeSpec?.output_node === true;
 
@@ -397,30 +373,35 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
   const { linkInputs, widgets, outputs } = useMemo(() => {
     if (!nodeSpec) return { linkInputs: [], outputs: [], widgets: [] };
     const links: { name: string; type: string; color: string }[] = [];
-    const wids: { name: string; config: [string, Record<string, unknown>?] }[] = [];
+    const wids: { name: string; config: [string | string[], Record<string, unknown>?] }[] = [];
     const outs: { name: string; type: string; color: string }[] = [];
 
     const allInputs = { ...(nodeSpec.input?.required || {}), ...(nodeSpec.input?.optional || {}) };
     Object.entries(allInputs).forEach(([name, config]) => {
       if (!config) return;
-      const [rawType, rawOptions] = config as [string, Record<string, unknown>?];
+      const [rawType, rawOptions] = config as [string | string[], Record<string, unknown>?];
       const isDropdown = Array.isArray(rawType);
       const hasOptions = rawOptions && typeof rawOptions === 'object';
-      const isPrimitive = ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'LONG'].includes(rawType);
+      const isPrimitive = typeof rawType === 'string' && ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'LONG'].includes(rawType);
       if (isDropdown || hasOptions || isPrimitive) {
         wids.push({ name, config: [rawType, rawOptions] });
-      } else {
-        links.push({ name, type: rawType, color: TYPE_COLORS[rawType] ?? TYPE_COLORS.default });
+      } else if (typeof rawType === 'string') {
+        links.push({ name, type: rawType, color: getTypeColor(rawType) });
       }
     });
 
-    if (nodeSpec.output && Array.isArray(nodeSpec.output)) {
-      nodeSpec.output.forEach((outType: string) => {
-        outs.push({ name: outType, type: outType, color: TYPE_COLORS[outType] ?? TYPE_COLORS.default });
+    const outputTypes = resolveNodeOutputTypes(nodeSpec, values);
+    if (outputTypes.length > 0) {
+      outputTypes.forEach((outType: string, idx: number) => {
+        outs.push({
+          name: nodeSpec.output_name?.[idx] ?? outType,
+          type: outType,
+          color: getTypeColor(outType),
+        });
       });
     }
     return { linkInputs: links, outputs: outs, widgets: wids };
-  }, [nodeSpec]);
+  }, [nodeSpec, values]);
 
   const hasIO = linkInputs.length > 0 || outputs.length > 0;
   const hasWidgets = widgets.length > 0;
@@ -432,76 +413,65 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
         isVisible={!!selected && !collapsed}
         minWidth={260}
         minHeight={80}
+        handleStyle={{ width: 8, height: 8 }}
+        lineStyle={{ borderColor: 'var(--color-accent)' }}
       />
 
       <div
         className={[
-          'node-wrapper',
-          'relative flex flex-col',
-          'rounded-[var(--radius-lg)]',
-          'border transition-all duration-[var(--motion-normal)]',
+          'relative flex flex-col rounded-[var(--radius-lg)] overflow-visible',
           'bg-[var(--color-node-body)]',
+          'border transition-all duration-[var(--motion-normal)]',
           selected
-            ? 'border-[var(--color-accent)] shadow-[var(--color-node-shadow-selected)]'
-            : 'border-[var(--color-node-border)] shadow-[var(--color-node-shadow)] hover:shadow-[var(--color-node-shadow-hover)] hover:border-[var(--color-node-border-hover)]',
-          _invalid ? 'border-[var(--color-warning)] ring-2 ring-[var(--color-warning)]/20' : '',
+            ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent),var(--shadow-node-selected)]'
+            : 'border-[var(--color-node-border)] shadow-[var(--shadow-node)] hover:shadow-[var(--shadow-node-hover)]',
+          _invalid ? 'border-[var(--color-warning)]' : '',
           status === 'running' ? 'node-running-pulse' : '',
         ].join(' ')}
-        style={{ minWidth: 260 }}
+        style={{ minWidth: 260, overflow: 'visible' }}
       >
-        {/* ===== ACCENT STRIP (left edge) ===== */}
-        <div
-          className="absolute left-0 top-3 bottom-3 w-[3px] rounded-full shrink-0"
-          style={{ backgroundColor: accentColor, opacity: 0.8 }}
-        />
-
         {/* ===== HEADER ===== */}
         <div
           className={[
-            'relative pl-3 pr-2 py-2 flex items-center justify-between gap-2',
+            'relative flex items-center justify-between gap-2 px-3 py-2',
             'bg-[var(--color-node-header)] border-b border-[var(--color-border-subtle)]',
             'rounded-t-[var(--radius-lg)] cursor-pointer select-none',
-            _invalid ? '' : '',
           ].join(' ')}
           onDoubleClick={(e) => { e.stopPropagation(); setCollapsed(!collapsed); }}
         >
-          {/* Left: icon + title + subtitle */}
+          {/* Left: category dot + title */}
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            {/* Category dot */}
             <div
               className="w-2 h-2 rounded-full shrink-0"
-              style={{ backgroundColor: accentColor, opacity: 0.9 }}
+              style={{ backgroundColor: accentColor }}
             />
             <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className={[
-                  'text-[12px] font-semibold truncate',
-                  _invalid ? 'text-[var(--color-warning)]' : 'text-[var(--color-text-primary)]',
-                ].join(' ')}>
-                  {nodeSpec?.display_name || data.opType || 'Unknown'}
-                </span>
-                {isOutputNode && (
-                  <span className="shrink-0 text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded-full bg-[var(--color-info-soft)] text-[var(--color-info)] border border-[var(--color-info)]/20">
-                    OUTPUT
-                  </span>
-                )}
-              </div>
+              <span className={[
+                'text-[12px] font-semibold truncate',
+                _invalid ? 'text-[var(--color-warning)]' : 'text-[var(--color-text-primary)]',
+              ].join(' ')}>
+                {nodeSpec?.display_name || data.opType || 'Unknown'}
+              </span>
               <span className="text-[10px] text-[var(--color-text-muted)] truncate">
                 {nodeSpec?.category?.split('/').pop() ?? nodeSpec?.category ?? data.opType}
               </span>
             </div>
           </div>
 
-          {/* Right: status pill + collapse */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          {/* Right: status + collapse */}
+          <div className="flex items-center gap-2 shrink-0">
+            {isOutputNode && (
+              <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-info-soft)] text-[var(--color-info)] border border-[var(--color-info)]/20">
+                OUTPUT
+              </span>
+            )}
             {hasFooter && (
               <Pill variant={STATUS_PILL_VARIANT[status]} dot pulse={status === 'running'}>
                 {STATUS_LABEL[status]}
               </Pill>
             )}
-            {/* Collapse toggle */}
             <button
-              className="w-5 h-5 flex items-center justify-center rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-surface-3)] transition-colors duration-[var(--motion-fast)]"
+              className="w-5 h-5 flex items-center justify-center rounded text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-surface-3)] transition-colors"
               onClick={(e) => { e.stopPropagation(); setCollapsed(!collapsed); }}
             >
               <svg
@@ -521,103 +491,102 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
           </div>
         )}
 
-        {/* ===== BODY ===== */}
-        <div className={`node-collapse-wrapper ${collapsed ? 'collapsed' : ''}`}>
-          <div className="node-collapse-inner">
-            <div className="px-3 py-2.5 flex flex-col gap-3">
-
-              {/* ---- IO Section ---- */}
-              {hasIO && (
-                <div className="flex gap-3">
-                  {/* Inputs column */}
-                  {linkInputs.length > 0 && (
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5 px-1">
-                        Inputs
-                      </div>
-                      <div className="flex flex-col gap-[3px]">
-                        {linkInputs.map((input) => (
-                          <div key={input.name} className="relative flex items-center h-6 pl-0.5">
-                            <Handle
-                              type="target"
-                              position={Position.Left}
-                              id={input.name}
-                              className="!w-2.5 !h-2.5 !-left-[11px] !border-[1.5px] !border-black/20"
-                              style={{ backgroundColor: input.color }}
-                            />
-                            <span className="text-[11px] text-[var(--color-text-secondary)] truncate">{input.name}</span>
-                            <span className="ml-auto shrink-0 pl-2">
-                              <TypeBadge type={input.type} />
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Outputs column */}
-                  {outputs.length > 0 && (
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5 px-1 text-right">
-                        Outputs
-                      </div>
-                      <div className="flex flex-col gap-[3px]">
-                        {outputs.map((output, i) => (
-                          <div key={i} className="relative flex items-center justify-end h-6 pr-0.5">
-                            <span className="mr-auto pr-2">
-                              <TypeBadge type={output.type} />
-                            </span>
-                            <Handle
-                              type="source"
-                              position={Position.Right}
-                              id={String(i)}
-                              className="!w-2.5 !h-2.5 !-right-[11px] !border-[1.5px] !border-black/20"
-                              style={{ backgroundColor: output.color }}
-                            />
-                            <span className="text-[11px] text-[var(--color-text-secondary)] truncate uppercase">{output.name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Empty IO hint */}
-              {linkInputs.length === 0 && outputs.length === 0 && (
-                <div className="text-[10px] text-[var(--color-text-muted)] italic px-1 py-0.5">
-                  No inputs or outputs
-                </div>
-              )}
-
-              {/* ---- Parameters Section ---- */}
-              {hasWidgets && (
-                <>
-                  <div className="border-t border-[var(--color-border-subtle)] pt-2">
-                    <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1.5 px-1">
-                      Parameters
-                    </div>
-                    <div className="flex flex-col gap-[2px]">
-                      {widgets.map((w) => (
-                        <ControlWidget
-                          key={w.name}
-                          {...w}
-                          value={values[w.name]}
-                          onChange={handleUpdate}
-                          disabled={locked}
-                        />
-                      ))}
-                    </div>
+        {/* ===== BODY — I/O always visible, only Parameters collapse ===== */}
+        {hasIO && (
+          <div className="px-3 pt-2 pb-1">
+            <div className="flex gap-3">
+              {/* INPUTS column */}
+              {linkInputs.length > 0 && (
+                <div className="flex-1 min-w-0">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1 px-0.5">
+                    Inputs
                   </div>
-                </>
+                  <div className="flex flex-col gap-[3px]">
+                    {linkInputs.map((input) => (
+                      <div
+                        key={input.name}
+                        className="relative flex items-center h-6"
+                      >
+                        {/* Handle — positioned to poke LEFT of node */}
+                        <Handle
+                          type="target"
+                          position={Position.Left}
+                          id={input.name}
+                          className="!w-2.5 !h-2.5 !-left-[10px] !border-2 !border-white/70 !rounded-full"
+                          style={{
+                            backgroundColor: input.color,
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            zIndex: 10,
+                          }}
+                        />
+                        <span className="text-[11px] text-[var(--color-text-secondary)] truncate pl-1">
+                          {input.name}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* OUTPUTS column */}
+              {outputs.length > 0 && (
+                <div className="flex-1 min-w-0">
+                  <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1 px-0.5 text-right">
+                    Outputs
+                  </div>
+                  <div className="flex flex-col gap-[3px]">
+                    {outputs.map((output, idx) => (
+                      <div
+                        key={idx}
+                        className="relative flex items-center justify-end h-6"
+                      >
+                        {/* Handle — positioned to poke RIGHT of node */}
+                        <Handle
+                          type="source"
+                          position={Position.Right}
+                          id={String(idx)}
+                          className="!w-2.5 !h-2.5 !-right-[10px] !border-2 !border-white/70 !rounded-full"
+                          style={{
+                            backgroundColor: output.color,
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            zIndex: 10,
+                          }}
+                        />
+                        <span className="text-[11px] text-[var(--color-text-secondary)] truncate pr-1 text-right">
+                          {output.name}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
           </div>
-        </div>
+        )}
+
+        {/* ===== PARAMETERS (hidden when collapsed) ===== */}
+        {!collapsed && hasWidgets && (
+          <div className="px-3 pb-2 flex flex-col gap-[2px]">
+            <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-muted)] mb-1 px-0.5">
+              Parameters
+            </div>
+            {widgets.map((w) => (
+              <ControlWidget
+                key={w.name}
+                {...w}
+                value={values[w.name]}
+                onChange={handleUpdate}
+                disabled={locked}
+              />
+            ))}
+          </div>
+        )}
 
         {/* ===== FOOTER ===== */}
         {hasFooter && (
-          <div className="mt-auto">
+          <div className="mt-auto rounded-b-[var(--radius-lg)] overflow-hidden">
             {/* Progress bar */}
             {showPercentage && (
               <div className="h-[3px] bg-[var(--color-bg-field)] w-full overflow-hidden relative">
@@ -637,15 +606,15 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
               'border-t border-[var(--color-border-subtle)]',
               'bg-[var(--color-node-header)]',
               'text-[10px] font-mono',
-              !showPercentage ? 'justify-center' : '',
+              !showPercentage || collapsed ? 'justify-center' : '',
             ].join(' ')}>
               <span className={[
                 'truncate max-w-[75%]',
-                !showPercentage ? 'text-center mx-auto text-[var(--color-text-muted)]' : 'text-[var(--color-text-secondary)]',
+                !showPercentage || collapsed ? 'text-center mx-auto text-[var(--color-text-muted)]' : 'text-[var(--color-text-secondary)]',
               ].join(' ')}>
-                {footerMessage}
+                {collapsed ? status === 'running' ? 'Running...' : STATUS_LABEL[status] : footerMessage}
               </span>
-              {showPercentage && status === 'running' && (
+              {showPercentage && status === 'running' && !collapsed && (
                 <span className="shrink-0 ml-2 text-[var(--color-accent)] font-semibold text-[10px]">
                   {Math.floor(progressValue)}%
                 </span>

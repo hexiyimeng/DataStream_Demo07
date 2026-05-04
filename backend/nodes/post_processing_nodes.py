@@ -335,7 +335,7 @@ class DaskStats:
             "required": {
                 "instance_partitions": ("INSTANCE_TABLE",),
                 "resolution_microns": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0}),
-                "output_dir": ("STRING", {"default": "./results", "tooltip": "Directory to write the CSV file"}),
+                "output_dir": ("STRING", {"default": "./results"}),
             }
         }
 

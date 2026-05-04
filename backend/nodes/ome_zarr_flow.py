@@ -586,7 +586,7 @@ class OMEZarrWriter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dask_arr": ("DASK_ARRAY",),
+                "dask_arr": ("DASK_ARRAY[any]",),
                 "output_path": ("STRING", {"default": "output.zarr", "multiline": False}),
                 "compressor_name": (["default", "zstd", "blosc", "lz4", "none"],),
             },

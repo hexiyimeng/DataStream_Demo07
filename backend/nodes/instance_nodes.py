@@ -233,7 +233,7 @@ class CellposePostProcessor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "mask_dask": ("DASK_ARRAY",),
+                "mask_dask": ("DASK_ARRAY[any]",),
                 "resolution_microns": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0}),
             }
         }

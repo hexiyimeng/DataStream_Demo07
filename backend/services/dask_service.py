@@ -268,22 +268,6 @@ class DaskService:
                 )
                 self.client = Client(self.cluster)
 
-            # 预先导入 cellpose 到 workers 中
-            def import_cellpose_on_workers():
-                try:
-                    from cellpose import models
-                    try:
-                        from cellpose import __version__
-                        logger.info(f"Cellpose imported successfully in worker (version {__version__})")
-                    except ImportError:
-                        logger.info(f"Cellpose imported successfully in worker (version unknown)")
-                except ImportError as e:
-                    logger.warning(f"Cellpose not available in worker: {e}")
-                except Exception as e:
-                    logger.warning(f"Error importing cellpose: {e}")
-
-            self.client.run(import_cellpose_on_workers)
-
             if platform.system() == "Linux":
                 self.client.run_on_scheduler(
                     lambda dask_scheduler: dask_scheduler.loop.call_later(60, self._trim_memory))
@@ -306,14 +290,15 @@ class DaskService:
             return None
 
     def stop_cluster(self):
-        # 清理所有 Worker 上的 Cellpose 模型缓存（释放 GPU 显存）
+        # 清理所有 Worker 上的通用资源缓存（释放模型/GPU 显存）
         if self.client:
             try:
-                from nodes.cellpose_node import force_clear_cellpose_model_cache
-                force_clear_cellpose_model_cache()
-                logger.info("[DaskService] Cellpose model cache cleared on cluster stop")
+                from core.resources.worker_resource_manager import force_clear_worker_resources
+
+                stats = self.client.run(force_clear_worker_resources)
+                logger.info(f"[DaskService] Worker resources cleared on cluster stop: {stats}")
             except Exception as e:
-                logger.debug(f"Failed to clear cellpose cache on stop: {e}")
+                logger.debug(f"Failed to clear worker resources on stop: {e}")
 
             try:
                 self.client.close()

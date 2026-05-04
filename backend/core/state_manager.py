@@ -441,12 +441,13 @@ class GlobalStateManager:
             logger.info(f"[StateManager] Cleaned up {cleaned_count} execution(s), {len(self.executions)} remaining")
 
         try:
-            from nodes.cellpose_node import clear_cellpose_model_cache
-            cleared = clear_cellpose_model_cache()
-            if cleared:
-                logger.info(f"[StateManager] GPU cache cleared via clear_if_safe(): {cleared}")
+            from core.resources.worker_resource_manager import clear_idle_worker_resources
+
+            cleared = clear_idle_worker_resources()
+            if cleared.get("disposed"):
+                logger.info(f"[StateManager] Idle main-process resources cleared: {cleared}")
         except Exception as e:
-            logger.debug(f"[StateManager] GPU cache clear_if_safe() skipped: {e}")
+            logger.debug(f"[StateManager] Idle resource cleanup skipped: {e}")
 
     def get_failed_execution_logs(self) -> list:
         return list(self._failed_execution_logs)

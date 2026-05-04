@@ -1,0 +1,58 @@
+import numpy as np
+
+from core.type_system import PORT_DTYPE_TO_NUMPY
+from core.registry import register_node
+from nodes.base import BaseBlockMapNode
+
+
+TYPE_CAST_DTYPES = list(PORT_DTYPE_TO_NUMPY.keys())
+
+
+def type_cast_block(block: np.ndarray, target_dtype: str, clip: bool) -> np.ndarray:
+    dtype = np.dtype(PORT_DTYPE_TO_NUMPY[target_dtype])
+    if block.dtype == dtype:
+        return block.astype(dtype, copy=False)
+
+    source = block
+    if clip and np.issubdtype(dtype, np.integer):
+        info = np.iinfo(dtype)
+        source = np.clip(source, info.min, info.max)
+
+    return source.astype(dtype, copy=False)
+
+
+@register_node("DaskTypeCast")
+class DaskTypeCast(BaseBlockMapNode):
+    CATEGORY = "BrainFlow/Utility"
+    DISPLAY_NAME = "Type Cast"
+
+    SKIP_EMPTY_BLOCKS = True
+    SKIP_ALL_ZERO_BLOCKS = False
+    FAILURE_POLICY = "raise"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dask_arr": ("DASK_ARRAY[any]",),
+                "target_dtype": (TYPE_CAST_DTYPES, {"default": "float32"}),
+                "clip": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("DASK_ARRAY[any]",)
+    RETURN_NAMES = ("dask_arr",)
+    FUNCTION = "execute"
+
+    PROCESS_BLOCK = type_cast_block
+
+    @classmethod
+    def RESOLVE_RETURN_TYPES(cls, inputs):
+        target_dtype = inputs.get("target_dtype") or "float32"
+        if target_dtype not in PORT_DTYPE_TO_NUMPY:
+            return cls.RETURN_TYPES
+        return (f"DASK_ARRAY[{target_dtype}]",)
+
+    def infer_output_dtype(self, input_dtype, params):
+        target_dtype = params.get("target_dtype") or "float32"
+        return np.dtype(PORT_DTYPE_TO_NUMPY[target_dtype])

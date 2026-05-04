@@ -1,61 +1,67 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+// src/hooks/useUndoRedo.ts
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import { debounce } from 'lodash-es'; // 需要安装: npm i lodash-es @types/lodash-es
+import { debounce } from 'lodash-es';
+import type { NodeData, NodeSpec } from '../types';
+import { serializeNodesForStorage, hydrateNodesWithLatestSpecs, validateEdgesWithLatestSpecs } from '../utils/workflowPersistence';
+import type { SerializedNode } from '../utils/workflowPersistence';
 
-interface HistoryState<T extends Record<string, unknown> = Record<string, unknown>> {
-  nodes: Node<T>[];
+interface HistoryState {
+  nodes: SerializedNode[];
   edges: Edge[];
 }
 
-export const useUndoRedo = <T extends Record<string, unknown> = Record<string, unknown>>(
-  initialNodes: Node<T>[],
-  initialEdges: Edge[],
-  setNodes: (nodes: Node<T>[]) => void,
-  setEdges: (edges: Edge[]) => void
+// NOTE: useUndoRedo always operates on Node<NodeData> internally.
+// The caller (FlowContext) passes T=NodeData so the hook composes with the rest
+// of the context, but internally we cast to Node<NodeData> for hydration compatibility.
+export const useUndoRedo = (
+  _initialNodes: Node<NodeData>[],
+  _initialEdges: Edge[],
+  setNodes: (nodes: Node<NodeData>[]) => void,
+  setEdges: (edges: Edge[]) => void,
+  nodeDefs: Record<string, NodeSpec> = {},
 ) => {
-  // 历史栈：过去和未来
-  const [past, setPast] = useState<HistoryState<T>[]>([]);
-  const [future, setFuture] = useState<HistoryState<T>[]>([]);
+  const [past, setPast] = useState<HistoryState[]>([]);
+  const [future, setFuture] = useState<HistoryState[]>([]);
 
-  // 当前状态的引用，用于快照
-  // 我们使用 ref 来避免闭包陷阱，保证拿到的总是最新的
-  const currentState = useRef<HistoryState<T>>({ nodes: initialNodes, edges: initialEdges });
+  const currentState = useRef<{ nodes: Node<NodeData>[]; edges: Edge[] }>({
+    nodes: [] as Node<NodeData>[],
+    edges: [] as Edge[],
+  });
 
-  // 同步外部状态到内部 Ref (每次外部 nodes/edges 变了都要调这个)
-  const syncCurrentState = useCallback((nodes: Node<T>[], edges: Edge[]) => {
+  const syncCurrentState = useCallback((nodes: Node<NodeData>[], edges: Edge[]) => {
     currentState.current = { nodes, edges };
   }, []);
 
-  // 核心：拍摄快照 (存入历史)
-  // 使用 debounce 防抖，防止拖拽节点时存入几百条记录
+  // Snapshot: store stripped (no runtime data) nodes
   const saveToHistory = useCallback(() => {
-    setPast((prev) => {
-      // 限制历史记录最多 30 步，节省内存
-      const newPast = [...prev, currentState.current];
+    const stripped = serializeNodesForStorage(currentState.current.nodes);
+    const newEntry: HistoryState = {
+      nodes: stripped,
+      edges: currentState.current.edges,
+    };
+
+    setPast(prev => {
+      const newPast = [...prev, newEntry];
       return newPast.length > 30 ? newPast.slice(newPast.length - 30) : newPast;
     });
-    setFuture([]); // 一旦有新操作，未来的记录就失效了
-  }, [currentState]);
+    setFuture([]);
+  }, []);
 
   const debouncedSaveHistoryRef = useRef<ReturnType<typeof debounce> | null>(null);
-  
+
   useEffect(() => {
-    // 清除之前的防抖函数
     if (debouncedSaveHistoryRef.current) {
       debouncedSaveHistoryRef.current.cancel();
     }
-    
-    // 创建新的防抖函数
     debouncedSaveHistoryRef.current = debounce(saveToHistory, 500);
-    
-    // 清理函数
     return () => {
       if (debouncedSaveHistoryRef.current) {
         debouncedSaveHistoryRef.current.cancel();
       }
     };
   }, [saveToHistory]);
-  
+
   const takeSnapshot = useCallback(() => {
     if (debouncedSaveHistoryRef.current) {
       debouncedSaveHistoryRef.current();
@@ -63,46 +69,70 @@ export const useUndoRedo = <T extends Record<string, unknown> = Record<string, u
   }, []);
 
   const undo = useCallback(() => {
-    setPast((prev) => {
+    setPast(prev => {
       if (prev.length === 0) return prev;
-
       const newPast = [...prev];
-      const previousState = newPast.pop(); // 拿到上一步
+      const previousEntry = newPast.pop();
+      if (!previousEntry) return prev;
 
-      if (previousState) {
-        // 把现在的状态推入 Future
-        setFuture((f) => [currentState.current, ...f]);
+      setFuture(f => [{
+        nodes: serializeNodesForStorage(currentState.current.nodes),
+        edges: currentState.current.edges,
+      }, ...f]);
 
-        // 恢复状态
-        setNodes(previousState.nodes);
-        setEdges(previousState.edges);
-        // 更新 Ref
-        currentState.current = previousState;
+      if (Object.keys(nodeDefs).length > 0) {
+        const hydratedNodes = hydrateNodesWithLatestSpecs(previousEntry.nodes, nodeDefs);
+        const { validEdges } = validateEdgesWithLatestSpecs(previousEntry.edges, hydratedNodes);
+        const castNodes = hydratedNodes as unknown as Node<NodeData>[];
+        setNodes(castNodes);
+        setEdges(validEdges);
+        currentState.current = { nodes: castNodes, edges: validEdges };
+      } else {
+        setNodes(currentState.current.nodes);
+        setEdges(currentState.current.edges);
       }
+
       return newPast;
     });
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, nodeDefs]);
 
   const redo = useCallback(() => {
-    setFuture((prev) => {
+    setFuture(prev => {
       if (prev.length === 0) return prev;
-
       const newFuture = [...prev];
-      const nextState = newFuture.shift(); // 拿到下一步
+      const nextEntry = newFuture.shift();
+      if (!nextEntry) return prev;
 
-      if (nextState) {
-        // 把现在的状态推入 Past
-        setPast((p) => [...p, currentState.current]);
+      setPast(p => [
+        ...p,
+        {
+          nodes: serializeNodesForStorage(currentState.current.nodes),
+          edges: currentState.current.edges,
+        },
+      ]);
 
-        // 恢复状态
-        setNodes(nextState.nodes);
-        setEdges(nextState.edges);
-        // 更新 Ref
-        currentState.current = nextState;
+      if (Object.keys(nodeDefs).length > 0) {
+        const hydratedNodes = hydrateNodesWithLatestSpecs(nextEntry.nodes, nodeDefs);
+        const { validEdges } = validateEdgesWithLatestSpecs(nextEntry.edges, hydratedNodes);
+        const castNodes = hydratedNodes as unknown as Node<NodeData>[];
+        setNodes(castNodes);
+        setEdges(validEdges);
+        currentState.current = { nodes: castNodes, edges: validEdges };
+      } else {
+        setNodes(currentState.current.nodes);
+        setEdges(currentState.current.edges);
       }
+
       return newFuture;
     });
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, nodeDefs]);
 
-  return { undo, redo, takeSnapshot, syncCurrentState, canUndo: past.length > 0, canRedo: future.length > 0 };
+  return {
+    undo,
+    redo,
+    takeSnapshot,
+    syncCurrentState,
+    canUndo: past.length > 0,
+    canRedo: future.length > 0,
+  };
 };

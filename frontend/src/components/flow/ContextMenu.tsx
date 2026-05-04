@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { useFlow } from '../../hooks/useFlowContext';
 import { createPortal } from 'react-dom';
 import type { NodeSpec } from '../../types';
@@ -9,54 +9,143 @@ interface MenuItem {
   children?: MenuItem[];
 }
 
-const CATEGORY_COLORS: Record<string, string> = {
-  'Image': '#3b82f6', 'Loader': '#22c55e', 'Output': '#a78bfa',
-  'Processing': '#f59e0b', 'Transform': '#06b6d4', 'Utils': '#94a3b8',
-  'BrainFlow/IO': '#22c55e', 'BrainFlow/Processing': '#3b82f6',
-  'BrainFlow/Segmentation': '#f59e0b', 'BrainFlow/Output': '#a78bfa',
-};
-function getCategoryColor(cat?: string): string {
-  if (!cat) return '#94a3b8';
-  return CATEGORY_COLORS[cat.split('/')[0]] ?? '#94a3b8';
-}
+// ─────────────────────────────────────────────
+// FloatingSubMenu — rendered via createPortal,
+// can appear at any depth and open its own children
+// ─────────────────────────────────────────────
+const FloatingSubMenu = ({
+  items,
+  anchorRect,
+  depth,
+  onSelect,
+  onSubmenuOpen,
+  onSubmenuCloseFromDepth,
+  onSubmenuMount,
+}: {
+  items: MenuItem[];
+  anchorRect: DOMRect;
+  depth: number;
+  onSelect: (v: string) => void;
+  onSubmenuOpen: (item: MenuItem, rect: DOMRect, depth: number) => void;
+  onSubmenuCloseFromDepth: (depth: number) => void;
+  onSubmenuMount: (el: HTMLDivElement | null) => void;
+}) => {
+  const submenuWidth = 220;
 
-const MenuList = ({ items, onSelect }: { items: MenuItem[], onSelect: (v: string) => void }) => {
-  const [active, setActive] = useState<string | null>(null);
-  return (
+  // Determine horizontal position
+  let left = anchorRect.right + 4;
+  if (left + submenuWidth > window.innerWidth - 8) {
+    left = anchorRect.left - submenuWidth - 4;
+  }
+  if (left < 8) left = 8;
+
+  // Determine vertical position
+  const estimatedHeight = Math.min(items.length * 32 + 16, 320);
+  let top = anchorRect.top;
+  if (top + estimatedHeight > window.innerHeight - 8) {
+    top = Math.max(8, window.innerHeight - estimatedHeight - 8);
+  }
+  if (top < 8) top = 8;
+
+  return createPortal(
     <div
-      className="flex flex-col rounded-[var(--radius-md)] overflow-hidden"
-      style={{ backgroundColor: 'var(--color-bg-surface)', border: '1px solid var(--color-border-default)', boxShadow: 'var(--shadow-dropdown)' }}
+      ref={onSubmenuMount}
+      className="fixed z-[10000] flex flex-col rounded-[var(--radius-md)] overflow-hidden"
+      style={{
+        left,
+        top,
+        width: submenuWidth,
+        backgroundColor: 'var(--color-bg-surface)',
+        border: '1px solid var(--color-border-default)',
+        boxShadow: 'var(--shadow-dropdown)',
+        maxHeight: `${window.innerHeight - top - 16}px`,
+        overflowY: 'auto',
+      }}
+      onClick={e => e.stopPropagation()}
+      onMouseEnter={() => onSubmenuCloseFromDepth(depth + 1)}
+      onMouseLeave={() => onSubmenuCloseFromDepth(depth + 1)}
     >
       {items.map(item => {
         const hasChildren = !!(item.children && item.children.length > 0);
-        const isActive = active === item.label;
         return (
           <div
             key={item.label}
             className="relative"
-            onMouseEnter={() => hasChildren && setActive(item.label)}
-            onMouseLeave={() => setActive(null)}
+            onMouseEnter={(e) => {
+              if (hasChildren) {
+                const rect = e.currentTarget.getBoundingClientRect();
+                onSubmenuOpen(item, rect, depth + 1);
+              }
+            }}
           >
             <div
               onClick={(e) => {
                 e.stopPropagation();
-                if (hasChildren) setActive(item.label);
-                else if (item.value) onSelect(item.value);
+                if (!hasChildren && item.value) {
+                  onSelect(item.value);
+                }
               }}
-              className={[
-                'px-3 py-1.5 flex items-center justify-between cursor-pointer select-none transition-colors duration-75',
-                'text-[12px]',
-                isActive ? 'bg-[var(--color-accent)] text-white' : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-field-hover)]',
-              ].join(' ')}
+              className="px-3 py-1.5 flex items-center justify-between cursor-pointer select-none text-[12px] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-field-hover)] transition-colors duration-75 whitespace-nowrap"
             >
-              <span className="truncate mr-6">{item.label}</span>
-              {hasChildren && <span className="text-[10px] opacity-70 shrink-0">▶</span>}
+              <span className="truncate mr-4">{item.label}</span>
+              {hasChildren && (
+                <span className="text-[10px] opacity-70 shrink-0 ml-1">▶</span>
+              )}
             </div>
-            {hasChildren && isActive && (
-              <div className="absolute top-0 left-full z-[100]" style={{ marginLeft: '2px' }}>
-                <MenuList items={item.children!} onSelect={onSelect} />
-              </div>
-            )}
+          </div>
+        );
+      })}
+    </div>,
+    document.body
+  );
+};
+
+// ─────────────────────────────────────────────
+// MenuList — renders current depth level items
+// ─────────────────────────────────────────────
+const MenuList = ({
+  items,
+  onSelect,
+  depth,
+  onSubmenuOpen,
+  onSubmenuCloseFromDepth,
+}: {
+  items: MenuItem[];
+  onSelect: (v: string) => void;
+  depth: number;
+  onSubmenuOpen: (item: MenuItem, rect: DOMRect, depth: number) => void;
+  onSubmenuCloseFromDepth: (depth: number) => void;
+}) => {
+  return (
+    <div className="flex flex-col">
+      {items.map(item => {
+        const hasChildren = !!(item.children && item.children.length > 0);
+        return (
+          <div
+            key={item.label}
+            className="relative"
+            onMouseEnter={(e) => {
+              if (hasChildren) {
+                const rect = e.currentTarget.getBoundingClientRect();
+                onSubmenuOpen(item, rect, depth);
+              }
+            }}
+            onMouseLeave={() => onSubmenuCloseFromDepth(depth + 1)}
+          >
+            <div
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!hasChildren && item.value) {
+                  onSelect(item.value);
+                }
+              }}
+              className="px-3 py-1.5 flex items-center justify-between cursor-pointer select-none text-[12px] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-field-hover)] transition-colors duration-75 whitespace-nowrap"
+            >
+              <span className="truncate mr-4">{item.label}</span>
+              {hasChildren && (
+                <span className="text-[10px] opacity-70 shrink-0 ml-1">▶</span>
+              )}
+            </div>
           </div>
         );
       })}
@@ -64,6 +153,9 @@ const MenuList = ({ items, onSelect }: { items: MenuItem[], onSelect: (v: string
   );
 };
 
+// ─────────────────────────────────────────────
+// ContextMenu
+// ─────────────────────────────────────────────
 interface ContextMenuProps {
   top: number;
   left: number;
@@ -74,6 +166,13 @@ interface ContextMenuProps {
 export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMenuProps) {
   const { nodeDefs } = useFlow();
   const [search, setSearch] = useState('');
+
+  // Stack of open floating submenus: each entry = { item, rect, depth }
+  const [submenuStack, setSubmenuStack] = useState<Array<{ item: MenuItem; rect: DOMRect; depth: number }>>([]);
+  const submenuCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track the deepest active submenu element for backdrop click detection
+  const activeSubmenuRef = useRef<HTMLDivElement | null>(null);
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -83,8 +182,9 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const adjustedX = Math.min(left, window.innerWidth - 320);
-  const adjustedY = Math.min(top, window.innerHeight - 480);
+  // Keep menu within viewport
+  const adjustedLeft = Math.min(left, window.innerWidth - 310);
+  const adjustedTop = Math.min(top, window.innerHeight - 80);
 
   const menuTree = useMemo(() => {
     const root: MenuItem[] = [];
@@ -119,53 +219,111 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
       .map(([type, d]) => ({ label: d.display_name, value: type, category: d.category, output: d.output }));
   }, [search, nodeDefs]);
 
+  // Open a submenu at a given depth (keeps items shallower than depth, replaces item at depth)
+  const openSubmenu = useCallback((item: MenuItem, rect: DOMRect, depth: number) => {
+    if (submenuCloseTimer.current) clearTimeout(submenuCloseTimer.current);
+    setSubmenuStack(prev => [
+      ...prev.slice(0, depth),
+      { item, rect, depth },
+    ]);
+  }, []);
+
+  // Close submenus from a given depth onward
+  const closeSubmenusFromDepth = useCallback((depth: number) => {
+    if (submenuCloseTimer.current) clearTimeout(submenuCloseTimer.current);
+    submenuCloseTimer.current = setTimeout(() => {
+      setSubmenuStack(prev => prev.filter(s => s.depth < depth));
+    }, 120);
+  }, []);
+
+  // Backdrop click: only close if the click is NOT inside the deepest FloatingSubMenu
+  const handleBackdropClick = useCallback((e: React.MouseEvent) => {
+    if (activeSubmenuRef.current?.contains(e.target as Node)) return;
+    onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    return () => {
+      if (submenuCloseTimer.current) clearTimeout(submenuCloseTimer.current);
+    };
+  }, []);
+
   return createPortal(
-    <div className="fixed inset-0 z-[9999]" onContextMenu={e => e.preventDefault()} onClick={onClose}>
+    // Backdrop
+    <div
+      className="fixed inset-0 z-[9998]"
+      style={{ backgroundColor: 'rgba(0,0,0,0)' }}
+      onClick={handleBackdropClick}
+      onContextMenu={e => { e.preventDefault(); e.stopPropagation(); }}
+    >
+      {/* Menu panel */}
       <div
-        className="fixed flex flex-col rounded-[var(--radius-lg)] overflow-hidden"
+        className="fixed flex flex-col rounded-[var(--radius-lg)]"
         style={{
-          top: adjustedY, left: adjustedX, width: 300,
+          top: adjustedTop,
+          left: adjustedLeft,
+          width: 300,
           backgroundColor: 'var(--color-bg-surface)',
           border: '1px solid var(--color-border-default)',
           boxShadow: 'var(--shadow-floating)',
+          zIndex: 9999,
+          overflow: 'visible',
+          maxHeight: '75vh',
         }}
         onClick={e => e.stopPropagation()}
+        onContextMenu={e => e.stopPropagation()}
       >
         {/* Search header */}
-        <div className="px-3 py-2.5 border-b" style={{ backgroundColor: 'var(--color-bg-surface-2)', borderColor: 'var(--color-border-subtle)' }}>
-          <div className="relative flex items-center">
-            <svg className="absolute left-2.5 w-3.5 h-3.5 pointer-events-none" style={{ color: 'var(--color-text-muted)' }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <input
-              ref={inputRef}
-              className="w-full h-8 rounded-[var(--radius-md)] pl-8 pr-3 text-[12px] outline-none transition-colors"
-              style={{
-                backgroundColor: 'var(--color-bg-field)',
-                border: '1px solid var(--color-border-default)',
-                color: 'var(--color-text-primary)',
-              }}
-              placeholder="Search nodes..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && flatResults && flatResults[0]?.value) {
-                  onAddNode(flatResults[0].value); onClose();
-                }
-              }}
-              onFocus={e => (e.currentTarget.style.borderColor = 'var(--color-border-focus)')}
-              onBlur={e => (e.currentTarget.style.borderColor = 'var(--color-border-default)')}
-            />
+        <div
+          style={{
+            backgroundColor: 'var(--color-bg-surface-2)',
+            borderBottom: '1px solid var(--color-border-subtle)',
+            borderRadius: 'var(--radius-lg) var(--radius-lg) 0 0',
+            flexShrink: 0,
+          }}
+        >
+          <div className="px-3 pt-2.5 pb-2">
+            <div className="relative flex items-center">
+              <svg
+                className="absolute left-2.5 w-3.5 h-3.5 pointer-events-none"
+                style={{ color: 'var(--color-text-muted)' }}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                ref={inputRef}
+                className="w-full h-8 rounded-[var(--radius-md)] pl-8 pr-3 text-[12px] outline-none transition-colors"
+                style={{
+                  backgroundColor: 'var(--color-bg-field)',
+                  border: '1px solid var(--color-border-default)',
+                  color: 'var(--color-text-primary)',
+                }}
+                placeholder="Search nodes..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && flatResults && flatResults[0]?.value) {
+                    onAddNode(flatResults[0].value); onClose();
+                  }
+                }}
+                onFocus={e => (e.currentTarget.style.borderColor = 'var(--color-border-focus)')}
+                onBlur={e => (e.currentTarget.style.borderColor = 'var(--color-border-default)')}
+              />
+            </div>
           </div>
         </div>
 
-        {/* Content */}
-        <div className="py-1 max-h-80 overflow-y-auto custom-scrollbar">
+        {/* Content — scrollable, does NOT clip submenus */}
+        <div
+          className="flex-1 overflow-y-auto custom-scrollbar"
+          style={{ overflowX: 'visible' }}
+        >
           {search ? (
             <div>
               {flatResults && flatResults.length > 0 ? (
                 <>
-                  <div className="px-3 py-1 text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
+                  <div className="px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider" style={{ color: 'var(--color-text-muted)' }}>
                     {flatResults.length} result{flatResults.length !== 1 ? 's' : ''}
                   </div>
                   {flatResults.map(item => {
@@ -174,7 +332,7 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
                       <div
                         key={item.value}
                         onClick={() => { if (item.value) { onAddNode(item.value); onClose(); } }}
-                        className="group flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors"
+                        className="flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors"
                         style={{ color: 'var(--color-text-primary)' }}
                         onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-bg-field-hover)')}
                         onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
@@ -185,7 +343,10 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
                           <div className="text-[10px]" style={{ color: 'var(--color-text-muted)' }}>{item.category}</div>
                         </div>
                         {item.output && item.output.length > 0 && (
-                          <span className="text-[9px] px-1 py-px rounded shrink-0" style={{ backgroundColor: 'var(--color-bg-field)', color: 'var(--color-text-muted)' }}>
+                          <span
+                            className="text-[9px] px-1 py-px rounded shrink-0"
+                            style={{ backgroundColor: 'var(--color-bg-field)', color: 'var(--color-text-muted)' }}
+                          >
                             {item.output[0]}
                           </span>
                         )}
@@ -200,15 +361,28 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
               )}
             </div>
           ) : (
-            <MenuList
-              items={menuTree}
-              onSelect={(val) => { onAddNode(val); onClose(); }}
-            />
+            <div className="py-1">
+              <MenuList
+                items={menuTree}
+                onSelect={(val) => { onAddNode(val); onClose(); }}
+                depth={0}
+                onSubmenuOpen={openSubmenu}
+                onSubmenuCloseFromDepth={closeSubmenusFromDepth}
+              />
+            </div>
           )}
         </div>
 
-        {/* Footer hint */}
-        <div className="px-3 py-1.5 border-t text-[9px]" style={{ backgroundColor: 'var(--color-bg-surface-2)', borderColor: 'var(--color-border-subtle)', color: 'var(--color-text-muted)' }}>
+        {/* Footer */}
+        <div
+          className="shrink-0 px-3 py-1.5 text-[9px]"
+          style={{
+            backgroundColor: 'var(--color-bg-surface-2)',
+            borderTop: '1px solid var(--color-border-subtle)',
+            borderRadius: '0 0 var(--radius-lg) var(--radius-lg)',
+            color: 'var(--color-text-muted)',
+          }}
+        >
           <span>↵ Add node</span>
           <span className="mx-2">·</span>
           <span>Esc close</span>
@@ -216,7 +390,34 @@ export default function ContextMenu({ top, left, onClose, onAddNode }: ContextMe
           <span>▶ Submenu</span>
         </div>
       </div>
+
+      {/* Floating submenus — one per depth level, all via portal */}
+      {submenuStack.map(entry => (
+        entry.item.children && (
+          <FloatingSubMenu
+            key={`${entry.depth}-${entry.item.label}`}
+            items={entry.item.children}
+            anchorRect={entry.rect}
+            depth={entry.depth}
+            onSelect={(v) => { onAddNode(v); onClose(); }}
+            onSubmenuOpen={openSubmenu}
+            onSubmenuCloseFromDepth={closeSubmenusFromDepth}
+            onSubmenuMount={(el) => { activeSubmenuRef.current = el; }}
+          />
+        )
+      ))}
     </div>,
     document.body
   );
+}
+
+function getCategoryColor(cat?: string): string {
+  const CATEGORY_COLORS: Record<string, string> = {
+    'Image': '#3b82f6', 'Loader': '#22c55e', 'Output': '#a78bfa',
+    'Processing': '#f59e0b', 'Transform': '#06b6d4', 'Utils': '#94a3b8',
+    'BrainFlow/IO': '#22c55e', 'BrainFlow/Processing': '#3b82f6',
+    'BrainFlow/Segmentation': '#f59e0b', 'BrainFlow/Output': '#a78bfa',
+  };
+  if (!cat) return '#94a3b8';
+  return CATEGORY_COLORS[cat.split('/')[0]] ?? '#94a3b8';
 }

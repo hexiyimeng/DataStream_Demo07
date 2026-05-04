@@ -1,7 +1,10 @@
+// src/hooks/useFlowOperations.ts
 import { useRef, useCallback, useEffect } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import type { NodeData, LogEntry } from '../types';
-//负责用户交互：复制、粘贴、删除、键盘快捷键。
+import type { NodeData, LogEntry, NodeSpec } from '../types';
+import { stripRuntimeNodeData, hydrateNodeFromSpec } from '../utils/workflowPersistence';
+import type { SerializedNode } from '../utils/workflowPersistence';
+
 export const useFlowOperations = (
   nodes: Node<NodeData>[],
   edges: Edge[],
@@ -10,24 +13,26 @@ export const useFlowOperations = (
   undo: () => void,
   redo: () => void,
   addLog: (msg: string, type?: LogEntry['type']) => void,
-  isExecutionLocked: boolean = false
+  isExecutionLocked: boolean = false,
+  nodeDefs: Record<string, NodeSpec> = {},
 ) => {
-  const clipboardRef = useRef<{ nodes: Node<NodeData>[], edges: Edge[] } | null>(null);
+  const clipboardRef = useRef<{ nodes: SerializedNode[]; edges: Edge[] } | null>(null);
 
-  // === 复制 ===
+  // === Copy ===
   const handleCopy = useCallback(() => {
     if (isExecutionLocked) return;
     const selectedNodes = nodes.filter(n => n.selected);
     if (selectedNodes.length === 0) return;
     const selectedIds = new Set(selectedNodes.map(n => n.id));
-    // 仅复制两端都被选中的连线
     const selectedEdges = edges.filter(e => selectedIds.has(e.source) && selectedIds.has(e.target));
 
-    clipboardRef.current = { nodes: selectedNodes, edges: selectedEdges };
+    // Store stripped (no runtime data) nodes + structural edges
+    const strippedNodes = selectedNodes.map(n => stripRuntimeNodeData(n));
+    clipboardRef.current = { nodes: strippedNodes, edges: selectedEdges };
     addLog(`Copied ${selectedNodes.length} nodes`, 'info');
   }, [nodes, edges, addLog, isExecutionLocked]);
 
-  // === 粘贴 ===
+  // === Paste ===
   const handlePaste = useCallback(() => {
     if (isExecutionLocked) return;
     if (!clipboardRef.current) return;
@@ -35,70 +40,55 @@ export const useFlowOperations = (
 
     const idMap = new Map<string, string>();
     const newNodes: Node<NodeData>[] = [];
-    const offset = 20 + Math.random() * 30; // 随机偏移防止重叠
 
-    // 1. 复制节点并重生成 ID（清理所有运行时字段）
     cpNodes.forEach(n => {
-       const newId = `${n.data.opType}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-       idMap.set(n.id, newId);
-       newNodes.push({
-         ...n, id: newId,
-         position: { x: n.position.x + offset, y: n.position.y + offset },
-         selected: true,
-         className: n.className ? n.className.replace('node-running-pulse', '').trim() : '',
-         data: {
-           ...n.data,
-           // 清理所有运行时字段
-           progress: 0,
-           message: '',
-           runState: undefined,
-           progressRole: undefined,
-           waitingFor: undefined,
-           device: undefined,
-           totalChunks: undefined,
-           processedChunks: undefined,
-           completedInferenceChunks: undefined,
-           skippedChunks: undefined,
-           failedChunks: undefined,
-           executionId: undefined,
-         }
-       });
+      const newId = `${n.data?.opType ?? 'node'}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      idMap.set(n.id, newId);
     });
 
-    // 2. 复制连线并重定向 ID
+    // Hydrate pasted nodes with fresh specs
+    cpNodes.forEach(n => {
+      const offsetX = 30 + Math.random() * 20;
+      const offsetY = 30 + Math.random() * 20;
+      const hydrated = hydrateNodeFromSpec(n, nodeDefs, {
+        x: n.position.x + offsetX,
+        y: n.position.y + offsetY,
+      });
+      hydrated.selected = true;
+      newNodes.push(hydrated);
+    });
+
+    // Remap edge references
     const newEdges = cpEdges.map(e => ({
-      ...e, id: `e_${idMap.get(e.source)}-${idMap.get(e.target)}_${Math.random()}`,
-      source: idMap.get(e.source)!, target: idMap.get(e.target)!, selected: true
+      ...e,
+      id: `e_${idMap.get(e.source)}-${idMap.get(e.target)}_${Math.random().toString(36).substr(2, 5)}`,
+      source: idMap.get(e.source)!,
+      target: idMap.get(e.target)!,
+      selected: true,
     }));
 
-    // 取消原有选中，选中新粘贴的
-    setNodes(nds => nds.map(n => ({ ...n, selected: false } as Node<NodeData>)).concat(newNodes));
-    setEdges(eds => eds.map(e => ({ ...e, selected: false } as Edge)).concat(newEdges));
+    setNodes(nds => (nds.map(n => ({ ...n, selected: false } as Node<NodeData>))).concat(newNodes));
+    setEdges(eds => eds.map(e => ({ ...e, selected: false })).concat(newEdges));
     addLog(`Pasted ${newNodes.length} nodes`, 'info');
-  }, [setNodes, setEdges, addLog, isExecutionLocked]);
+  }, [setNodes, setEdges, addLog, isExecutionLocked, nodeDefs]);
 
-  // === 删除 ===
+  // === Delete ===
   const handleDelete = useCallback(() => {
     if (isExecutionLocked) return;
-      const selectedNodes = nodes.filter(n => n.selected);
-      const selectedEdges = edges.filter(e => e.selected);
-      if (selectedNodes.length === 0 && selectedEdges.length === 0) return;
-
-      setNodes(nds => nds.filter(n => !n.selected));
-      setEdges(eds => eds.filter(e => !e.selected));
+    const selectedNodes = nodes.filter(n => n.selected);
+    const selectedEdges = edges.filter(e => e.selected);
+    if (selectedNodes.length === 0 && selectedEdges.length === 0) return;
+    setNodes(nds => nds.filter(n => !n.selected));
+    setEdges(eds => eds.filter(e => !e.selected));
   }, [nodes, edges, setNodes, setEdges, isExecutionLocked]);
 
-  // === 快捷键监听 ===
+  // === Keyboard shortcuts ===
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      // 避免在输入框打字时触发快捷键
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable) return;
-
       const isCtrl = e.metaKey || e.ctrlKey;
-
-      if (isExecutionLocked) return; // 运行中禁止快捷键操作
-
+      if (isExecutionLocked) return;
       if (isCtrl && e.key.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
       else if (isCtrl && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
       else if (isCtrl && e.key.toLowerCase() === 'c') { e.preventDefault(); handleCopy(); }

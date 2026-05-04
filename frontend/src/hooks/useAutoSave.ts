@@ -1,69 +1,65 @@
 // src/hooks/useAutoSave.ts
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Node, Edge } from '@xyflow/react';
-import type { NodeData } from '../types';
+import type { NodeData, NodeSpec } from '../types';
+import {
+  serializeFlowForStorage,
+  parseStoredFlow,
+  hydrateFlowWithLatestSpecs,
+} from '../utils/workflowPersistence';
 
 export const useAutoSave = (
   nodes: Node<NodeData>[],
   edges: Edge[],
-  setNodes: (n: Node<NodeData>[]) => void,
-  setEdges: (e: Edge[]) => void
+  setNodes: React.Dispatch<React.SetStateAction<Node<NodeData>[]>>,
+  setEdges: React.Dispatch<React.SetStateAction<Edge[]>>,
+  nodeDefs: Record<string, NodeSpec>,
 ) => {
-  // 1. 初始化恢复 (关键修改：数据清洗)
+  // Track whether initial restore has happened — only restore once on mount
+  const hasRestoredRef = useRef(false);
+
+  // ============================================================
+  // 1. Restore from autosave (once, on mount, after nodeDefs is ready)
+  // ============================================================
   useEffect(() => {
+    if (hasRestoredRef.current) return;
+    if (Object.keys(nodeDefs).length === 0) return; // nodeDefs not loaded yet
+
+    hasRestoredRef.current = true;
+
     const savedData = localStorage.getItem('BRAINFLOW_AUTOSAVE');
-    if (savedData) {
-      try {
-        const parsed = JSON.parse(savedData);
+    if (!savedData) return;
 
-        // A. 恢复节点，但强制重置运行状态（清理所有运行时字段）
-        if (parsed.nodes && Array.isArray(parsed.nodes)) {
-          const cleanNodes = parsed.nodes.map((n: Node<NodeData>) => ({
-            ...n,
-            // 移除可能残留的呼吸灯样式类名
-            className: n.className ? n.className.replace('node-running-pulse', '').trim() : '',
-            // 强制覆盖 data 中的所有运行时状态
-            data: {
-              ...n.data,
-              progress: 0,
-              message: '',
-              runState: undefined,
-              progressRole: undefined,
-              waitingFor: undefined,
-              device: undefined,
-              totalChunks: undefined,
-              processedChunks: undefined,
-              completedInferenceChunks: undefined,
-              skippedChunks: undefined,
-              failedChunks: undefined,
-              executionId: undefined,
-            }
-          }));
-          setNodes(cleanNodes);
-        }
+    try {
+      const parsed = JSON.parse(savedData);
+      const flow = parseStoredFlow(parsed);
+      if (!flow || flow.nodes.length === 0) return;
 
-        // B. 恢复连线，但强制停止动画
-        if (parsed.edges && Array.isArray(parsed.edges)) {
-          const cleanEdges = parsed.edges.map((e: Edge) => ({
-            ...e,
-            animated: false, // 强制停止蚂蚁线动画
-            style: { ...e.style, stroke: '#94a3b8', strokeWidth: 2 } // 恢复默认颜色
-          }));
-          setEdges(cleanEdges);
-        }
+      const result = hydrateFlowWithLatestSpecs(flow, nodeDefs);
+      setNodes(result.nodes);
+      setEdges(result.edges);
 
-        console.log("Session restored from local storage (Runtime state cleansed).");
-      } catch (e) {
-        console.error("AutoSave load failed:", e);
+      if (result.warnings.length > 0) {
+        result.warnings.forEach(w => console.warn('[AutoSave]', w));
       }
+      if (result.invalidNodeTypes.length > 0) {
+        console.warn(`[AutoSave] ${result.invalidNodeTypes.length} unavailable node type(s) marked invalid`);
+      }
+      if (result.removedEdges > 0) {
+        console.warn(`[AutoSave] Removed ${result.removedEdges} invalid connection(s) after updating node definitions`);
+      }
+    } catch (e) {
+      console.error('[AutoSave] Restore failed:', e);
     }
-  }, []); // 空依赖，只在组件挂载时执行一次
+  }, [nodeDefs, setNodes, setEdges]);
 
-  // 2. 自动保存 (保持不变，依然保存当前的结构)
+  // ============================================================
+  // 2. Autosave (save stripped/serialized data only)
+  // ============================================================
   useEffect(() => {
     const timer = setTimeout(() => {
-      // 保存时其实可以把 dirty state 存进去，但加载时清洗掉即可，这样逻辑最简单
-      const dataToSave = { nodes, edges, timestamp: Date.now() };
+      const stripped = serializeFlowForStorage(nodes, edges);
+      const dataToSave = { ...stripped, timestamp: Date.now() };
       localStorage.setItem('BRAINFLOW_AUTOSAVE', JSON.stringify(dataToSave));
     }, 1000);
     return () => clearTimeout(timer);

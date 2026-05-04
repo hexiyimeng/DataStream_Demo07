@@ -1,9 +1,15 @@
+// src/components/layout/Header.tsx
 import { useRef, useState, useEffect, type ChangeEvent } from 'react';
 import { useReactFlow, getNodesBounds, getViewportForBounds } from '@xyflow/react';
 import { useFlow } from '../../hooks/useFlowContext';
 import { Button } from '../ui/Button';
 import { IconButton } from '../ui/IconButton';
 import { Pill } from '../ui/Pill';
+import {
+  serializeFlowForStorage,
+  parseStoredFlow,
+  hydrateFlowWithLatestSpecs,
+} from '../../utils/workflowPersistence';
 
 const SunIcon = () => (
   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -100,15 +106,25 @@ export default function Header() {
       .catch(() => {});
   }, [isConnected]);
 
+  // === Save (export stripped/serialized workflow JSON) ===
   const handleSave = () => {
     if (!reactFlowInstance) return;
     const currentFlow = workflows.find(w => w.id === activeWorkflowId);
     const defaultName = currentFlow ? currentFlow.name : `workflow_${Date.now()}`;
-    const fileName = prompt("Save workflow as:", defaultName);
+    const fileName = prompt('Save workflow as:', defaultName);
     if (fileName === null) return;
     const finalName = fileName.trim() || defaultName;
-    const flowData = reactFlowInstance.toObject();
-    const blob = new Blob([JSON.stringify({ ...flowData, workflow_name: finalName, timestamp: Date.now() }, null, 2)], { type: 'application/json' });
+
+    // Use the serialized form (already stripped when saved to workflow tabs)
+    const serialized = serializeFlowForStorage(
+      reactFlowInstance.getNodes() as import('@xyflow/react').Node<import('../../types').NodeData>[],
+      reactFlowInstance.getEdges()
+    );
+
+    const blob = new Blob(
+      [JSON.stringify({ ...serialized, workflow_name: finalName, timestamp: Date.now() }, null, 2)],
+      { type: 'application/json' }
+    );
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `${finalName}.json`;
@@ -118,29 +134,45 @@ export default function Header() {
     URL.revokeObjectURL(link.href);
   };
 
+  // === Load (import + hydrate using shared utility) ===
   const handleLoad = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const flow = JSON.parse(ev.target?.result as string);
-        if (!Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
-          alert("Invalid file format"); return;
+        const raw = JSON.parse(ev.target?.result as string);
+        const flow = parseStoredFlow(raw);
+        if (!flow || !Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
+          alert('Invalid file format');
+          return;
         }
-        setNodes([]); setEdges([]);
+
+        // Clear canvas first
+        setNodes([]);
+        setEdges([]);
+
         setTimeout(() => {
-          const invalid: string[] = [], updated: string[] = [];
-          const processed = flow.nodes.map((node: any) => {
-            const latestSpec = nodeDefs[node.data?.opType];
-            if (!latestSpec) { invalid.push(node.data?.opType); return { ...node, data: { ...node.data, nodeSpec: node.data?.nodeSpec || {}, _invalid: true, _warning: `Node '${node.data?.opType}' removed` } }; }
-            updated.push(node.data?.opType);
-            return { ...node, data: { ...node.data, nodeSpec: latestSpec } };
-          });
-          setNodes(processed); setEdges(flow.edges);
-          if (invalid.length) alert(`Loaded ${processed.length} nodes (${invalid.length} invalid)`);
-          if (flow.workflow_name && activeWorkflowId) { try { renameWorkflow(activeWorkflowId, flow.workflow_name); } catch {} }
-          const bounds = getNodesBounds(processed);
+          if (Object.keys(nodeDefs).length === 0) {
+            alert('Node definitions not loaded yet. Please wait and try again.');
+            return;
+          }
+
+          const result = hydrateFlowWithLatestSpecs(flow, nodeDefs);
+          setNodes(result.nodes);
+          setEdges(result.edges);
+
+          if (result.invalidNodeTypes.length > 0) {
+            alert(`Loaded ${result.nodes.length} nodes (${result.invalidNodeTypes.length} unavailable node type(s) marked invalid)`);
+          } else if (result.removedEdges > 0) {
+            alert(`Loaded ${result.nodes.length} nodes, removed ${result.removedEdges} invalid connection(s)`);
+          }
+
+          if (raw.workflow_name && activeWorkflowId) {
+            try { renameWorkflow(activeWorkflowId, raw.workflow_name); } catch {}
+          }
+
+          const bounds = getNodesBounds(result.nodes);
           if (bounds && bounds.width > 0) {
             const vp = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
             reactFlowInstance.setViewport(vp);
@@ -194,7 +226,7 @@ export default function Header() {
             <div
               key={wf.id}
               onClick={() => switchWorkflow(wf.id)}
-              onDoubleClick={() => { const n = prompt("Rename:", wf.name); if (n) renameWorkflow(wf.id, n.trim()); }}
+              onDoubleClick={() => { const n = prompt('Rename:', wf.name); if (n) renameWorkflow(wf.id, n.trim()); }}
               className={[
                 'group relative flex items-center gap-1.5 px-3 rounded-t-md transition-all cursor-pointer min-w-[90px] max-w-[160px] border',
               ].join(' ')}

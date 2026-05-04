@@ -55,7 +55,7 @@ export interface ExecutionRuntimeState {
 
 // === 基础配置 ===
 export interface NodeInputConfig {
-  [key: string]: [string, Record<string, unknown>?];
+  [key: string]: [string | string[], Record<string, unknown>?];
 }
 
 // === 节点的规格 (Node Specification) ===

@@ -12,6 +12,13 @@ from distributed import Queue, wait as dist_wait
 from services.dask_service import dask_service
 from core.registry import NODE_CLASS_MAPPINGS, ProgressType
 from core.state_manager import state_manager, ExecutionStatus
+from core.model_ref import ModelRef
+from core.model_registry import validate_model_ref
+from core.resources.worker_resource_manager import (
+    clear_idle_worker_resources,
+    validate_model_refs_on_worker,
+)
+from core.type_system import can_connect_types
 from utils.progress_helper import get_progress_queue_name, get_stage_progress_queue_name
 from utils.memory_monitor import get_memory_monitor
 
@@ -47,6 +54,163 @@ def validate_graph_acyclic(graph: dict):
     for node_id in graph:
         if node_id not in visited:
             dfs(node_id)
+
+
+def _get_node_input_defs(node_cls) -> dict:
+    if not hasattr(node_cls, "INPUT_TYPES"):
+        return {"required": {}, "optional": {}}
+    try:
+        return node_cls.INPUT_TYPES()
+    except Exception as e:
+        logger.warning(f"Failed to get INPUT_TYPES from {node_cls}: {e}")
+        return {"required": {}, "optional": {}}
+
+
+def _get_declared_input_type(node_cls, input_name: str):
+    input_defs = _get_node_input_defs(node_cls)
+    config = (
+        input_defs.get("required", {}).get(input_name)
+        or input_defs.get("optional", {}).get(input_name)
+    )
+    if not config:
+        return None
+    declared = config[0] if isinstance(config, (tuple, list)) and len(config) > 0 else config
+    if isinstance(declared, list):
+        return None
+    return declared
+
+
+def _resolve_source_return_types(node_cls, node_inputs: dict):
+    resolver = getattr(node_cls, "RESOLVE_RETURN_TYPES", None)
+    if resolver is not None:
+        try:
+            resolved = resolver(node_inputs or {})
+            if resolved:
+                return tuple(resolved)
+        except Exception as e:
+            logger.warning(f"Failed to resolve dynamic RETURN_TYPES for {node_cls}: {e}")
+    return tuple(getattr(node_cls, "RETURN_TYPES", ()))
+
+
+def validate_graph_types(graph: dict):
+    for target_id, target_data in graph.items():
+        target_type_name = target_data.get("type")
+        target_cls = NODE_CLASS_MAPPINGS.get(target_type_name)
+        if target_cls is None:
+            continue
+
+        for input_name, input_value in target_data.get("inputs", {}).items():
+            if not (isinstance(input_value, list) and len(input_value) == 2):
+                continue
+
+            source_id, source_output_index = input_value
+            source_data = graph.get(source_id)
+            if source_data is None:
+                continue
+
+            source_type_name = source_data.get("type")
+            source_cls = NODE_CLASS_MAPPINGS.get(source_type_name)
+            if source_cls is None:
+                continue
+
+            target_declared_type = _get_declared_input_type(target_cls, input_name)
+            if target_declared_type is None:
+                continue
+
+            try:
+                source_output_index = int(source_output_index)
+            except Exception:
+                raise ValueError(
+                    f"Connection type mismatch: invalid source output index "
+                    f"{source_output_index!r} on {source_type_name}({source_id})."
+                )
+
+            source_return_types = _resolve_source_return_types(
+                source_cls,
+                source_data.get("inputs", {}),
+            )
+            if source_output_index < 0 or source_output_index >= len(source_return_types):
+                raise ValueError(
+                    f"Connection type mismatch: {source_type_name}({source_id}) "
+                    f"has no output index {source_output_index}."
+                )
+
+            source_declared_type = source_return_types[source_output_index]
+            ok, reason = can_connect_types(str(source_declared_type), str(target_declared_type))
+            if ok:
+                continue
+
+            source_names = tuple(getattr(source_cls, "RETURN_NAMES", ()))
+            source_output_name = (
+                source_names[source_output_index]
+                if source_output_index < len(source_names)
+                else f"output_{source_output_index}"
+            )
+            if str(source_declared_type).startswith("MODEL[") or str(target_declared_type).startswith("MODEL["):
+                suggestion = "Connect a compatible ModelLoader node for this model provider."
+            else:
+                suggestion = "Please insert DaskTypeCast between them for explicit dtype conversion."
+            raise ValueError(
+                "Connection type mismatch:\n"
+                f"{source_type_name}({source_id}).{source_output_name} outputs {source_declared_type},\n"
+                f"but {target_type_name}({target_id}).{input_name} requires {target_declared_type}.\n"
+                f"Reason: {reason}.\n"
+                f"{suggestion}"
+            )
+
+
+def _iter_model_refs(value):
+    if isinstance(value, ModelRef):
+        yield value
+        return
+    if isinstance(value, dict):
+        if {"provider", "name"}.issubset(value.keys()):
+            try:
+                yield ModelRef.from_dict(value)
+                return
+            except Exception:
+                pass
+        for item in value.values():
+            yield from _iter_model_refs(item)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            yield from _iter_model_refs(item)
+
+
+def _dedupe_model_refs(refs) -> list[ModelRef]:
+    deduped = {}
+    for ref in refs:
+        if isinstance(ref, dict):
+            ref = ModelRef.from_dict(ref)
+        if isinstance(ref, ModelRef):
+            deduped[ref.stable_key()] = ref
+    return list(deduped.values())
+
+
+def _validate_model_refs_before_submit(client, refs: list[ModelRef]) -> None:
+    refs = _dedupe_model_refs(refs)
+    if not refs:
+        return
+
+    for ref in refs:
+        try:
+            validate_model_ref(ref)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Model preflight failed for {ref.provider}:{ref.name}: {exc}"
+            ) from exc
+
+    if client is None:
+        return
+
+    try:
+        client.run(validate_model_refs_on_worker, refs)
+    except Exception as exc:
+        details = ", ".join(f"{ref.provider}:{ref.name}" for ref in refs)
+        raise RuntimeError(
+            f"Worker model preflight failed for {details}: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 # =============================================================================
@@ -406,6 +570,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
     try:
         client = dask_service.get_client()
         validate_graph_acyclic(graph)
+        validate_graph_types(graph)
 
         # === 内存快照：execution 开始 ===
         mem_monitor.log_snapshot("execution_start", client=client)
@@ -441,6 +606,7 @@ async def execute_graph(graph: dict, execution_id: str = None):
         monitor_tasks = []    # 进度监控任务列表
         sink_progress_meta = {}  # node_id -> sink monitoring metadata
         node_dask_objs = {}   # node_id -> dask array（用于中间节点 queue monitor）
+        model_refs = {}       # stable key -> ModelRef collected during GraphBuilding
         loop = asyncio.get_running_loop()
 
         # ==========================================================================
@@ -569,12 +735,23 @@ async def execute_graph(graph: dict, execution_id: str = None):
                     src_result = results[dep_id]
                     val = None
                     if isinstance(src_result, tuple):
-                        if slot_idx < len(src_result):
-                            val = src_result[slot_idx]
+                        if slot_idx >= len(src_result):
+                            raise ValueError(
+                                f"Node '{node_id}': output slot {slot_idx} out of range "
+                                f"(source '{dep_id}' has {len(src_result)} slots). "
+                                f"Check that the connection uses the correct output index."
+                            )
+                        val = src_result[slot_idx]
                         for item in src_result:
                             if isinstance(item, dict) and ("axes" in item or "source_path" in item):
                                 upstream_metadatas.append(item)
                     else:
+                        if slot_idx != 0:
+                            raise ValueError(
+                                f"Node '{node_id}': output slot {slot_idx} out of range "
+                                f"(source '{dep_id}' has 1 slot). "
+                                f"Check that the connection uses the correct output index."
+                            )
                         val = src_result
                     final_inputs[arg_name] = val
 
@@ -588,6 +765,22 @@ async def execute_graph(graph: dict, execution_id: str = None):
                 func_args = validate_and_prepare_inputs(NodeCls, final_inputs, node_id)
                 func_args["_node_id"] = node_id
                 func_args["_execution_id"] = execution_id
+
+                for ref in _iter_model_refs(func_args):
+                    model_refs[ref.stable_key()] = ref
+
+                required_model_refs = getattr(NodeCls, "REQUIRED_MODEL_REFS", None)
+                if required_model_refs is not None:
+                    try:
+                        hook_inputs = {k: v for k, v in func_args.items() if not k.startswith("_")}
+                        for ref in required_model_refs(hook_inputs) or []:
+                            if isinstance(ref, dict):
+                                ref = ModelRef.from_dict(ref)
+                            model_refs[ref.stable_key()] = ref
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"Model preflight declaration failed for {class_name}({node_id}): {e}"
+                        ) from e
 
                 instance = NodeCls()
                 method = getattr(instance, getattr(NodeCls, "FUNCTION", "execute"))
@@ -737,6 +930,10 @@ async def execute_graph(graph: dict, execution_id: str = None):
             state_manager.add_log(msg, "info", execution_id=execution_id)
             await asyncio.gather(*(schedule_node(nid) for nid in output_nodes))
 
+            for node_result in results.values():
+                for ref in _iter_model_refs(node_result):
+                    model_refs[ref.stable_key()] = ref
+
             # ── Phase 2: 统一提交 DELAYED sink ────────────────────────────────────
             # 收集所有 output 节点返回的 DELAYED 对象
             delayed_sinks = []   # [(node_id, delayed_obj), ...]
@@ -754,6 +951,8 @@ async def execute_graph(graph: dict, execution_id: str = None):
             if delayed_sinks:
                 client = dask_service.get_client()
                 if client:
+                    _validate_model_refs_before_submit(client, list(model_refs.values()))
+
                     msg = f"Submitted ({len(delayed_sinks)} sink(s)) — Computing..."
                     await state_manager.broadcast(execution_id, {"type": "log", "message": msg})
                     state_manager.add_log(msg, "info", execution_id=execution_id)
@@ -1000,6 +1199,12 @@ async def execute_graph(graph: dict, execution_id: str = None):
                         logger.info(f"[Cleanup] Released {len(sink_futures)} sink futures (normal completion)")
             except Exception as e:
                 logger.debug(f"[Cleanup] Failed to release sink futures: {e}")
+
+            try:
+                cleanup_stats = client.run(clear_idle_worker_resources)
+                logger.info(f"[Cleanup] Idle worker resources cleared: {cleanup_stats}")
+            except Exception as e:
+                logger.debug(f"[Cleanup] Idle worker resource cleanup skipped: {e}")
 
         # 5. 清理本地引用（帮助 Python GC）
         sink_futures.clear()

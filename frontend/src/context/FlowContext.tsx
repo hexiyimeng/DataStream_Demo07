@@ -9,10 +9,11 @@ import { useAutoSave } from '../hooks/useAutoSave';
 import { useFlowOperations } from '../hooks/useFlowOperations';
 import { useFlowEngine } from '../hooks/useFlowEngine';
 import { useWorkflows } from '../hooks/useWorkflows';
+import { canConnectPorts, resolveNodeOutputTypes } from '../utils/portTypes';
 
 export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // ===========================================
-  // 1. 基础状态 (Base State)
+  // 1. Base State
   // ===========================================
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<NodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -20,7 +21,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isConsoleOpen, setIsConsoleOpen] = useState(true);
   const [connectingType, setConnectingType] = useState<string | null>(null);
 
-  // 日志系统
+  // Log system
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logBufferRef = useRef<LogEntry[]>([]);
 
@@ -30,7 +31,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const clearLogs = useCallback(() => setLogs([]), []);
 
-  // 日志 Tick Loop (避免高频 setState)
+  // Log tick loop — batch updates to avoid high-frequency setState
   useEffect(() => {
     const tick = setInterval(() => {
       if (logBufferRef.current.length > 0) {
@@ -42,40 +43,17 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => clearInterval(tick);
   }, []);
 
-  // 主题副作用
+  // Theme effect
   useEffect(() => { document.documentElement.classList.toggle('dark', theme === 'dark'); }, [theme]);
 
   const toggleTheme = useCallback(() => setTheme(t => t === 'light' ? 'dark' : 'light'), []);
   const toggleConsole = useCallback(() => setIsConsoleOpen(p => !p), []);
 
   // ===========================================
-  // 2. 核心 Hook 组装 (Composition)
+  // 2. Engine core — must come first so nodeDefs is available
+  //    to downstream hooks (autosave / workflows / undo-redo / operations)
   // ===========================================
 
-  // A. 撤销/重做（只在用户编辑时触发，不在运行时状态更新时触发）
-  const { undo, redo, takeSnapshot, syncCurrentState } = useUndoRedo<NodeData>(
-    [], [], (nds) => setNodes(nds), (eds) => setEdges(eds)
-  );
-
-  // B. 历史快照触发器（只在非运行态更新时触发 undo snapshot）
-  useEffect(() => {
-    syncCurrentState(nodes, edges);
-    const hasActiveExecution = nodes.some(
-      n => n.data.runState === 'submitted' || n.data.runState === 'running'
-    );
-    if (!hasActiveExecution) takeSnapshot();
-  }, [nodes, edges, syncCurrentState, takeSnapshot]);
-
-  // C. 自动保存 (LocalStorage)
-  useAutoSave(nodes, edges, setNodes, setEdges);
-
-  // E. 工作流管理 (多 Tab)
-  const {
-    workflows, activeWorkflowId, createWorkflow, switchWorkflow,
-    deleteWorkflow, renameWorkflow, saveCurrentWorkflow
-  } = useWorkflows(nodes, edges, setNodes, setEdges, addLog);
-
-  // F. 引擎核心 (WebSocket/Run) — 解构新增的 execution state
   const {
     websocketStatus,
     nodeDefs,
@@ -85,7 +63,38 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   } = useFlowEngine(nodes, edges, setNodes, setEdges, addLog);
 
   // ===========================================
-  // 3. 派生的执行状态便捷访问器
+  // 3. Undo/Redo — snapshots store stripped nodes, restore rehydrates
+  // ===========================================
+  const { undo, redo, takeSnapshot, syncCurrentState } = useUndoRedo(
+    [], [], (nds) => setNodes(nds), (eds) => setEdges(eds), nodeDefs
+  );
+
+  // ===========================================
+  // 4. Autosave — restores stripped data with latest specs
+  // ===========================================
+  useAutoSave(nodes, edges, setNodes, setEdges, nodeDefs);
+
+  // ===========================================
+  // 5. Workflows — stored as stripped nodes, hydrated on switch
+  // ===========================================
+  const {
+    workflows, activeWorkflowId, createWorkflow, switchWorkflow,
+    deleteWorkflow, renameWorkflow, saveCurrentWorkflow
+  } = useWorkflows(nodes, edges, setNodes, setEdges, nodeDefs, addLog);
+
+  // ===========================================
+  // 6. Snapshot trigger — only on non-running state changes
+  // ===========================================
+  useEffect(() => {
+    syncCurrentState(nodes, edges);
+    const hasActiveExecution = nodes.some(
+      n => n.data.runState === 'submitted' || n.data.runState === 'running'
+    );
+    if (!hasActiveExecution) takeSnapshot();
+  }, [nodes, edges, syncCurrentState, takeSnapshot]);
+
+  // ===========================================
+  // 7. Derived execution state
   // ===========================================
   const isExecuting = executionState.phase === 'graph_building'
     || executionState.phase === 'submitted'
@@ -95,12 +104,37 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const isExecutionLocked = isExecuting;
   const isConnected = websocketStatus === 'connected';
 
-  // D. 交互操作 (复制/粘贴/快捷键) — 必须在 isExecutionLocked 定义之后
-  const { handleCopy, handlePaste, handleDelete } = useFlowOperations(nodes, edges, setNodes, setEdges, undo, redo, addLog, isExecutionLocked);
+  // ===========================================
+  // 8. Flow operations — paste hydrates with fresh specs
+  // ===========================================
+  const { handleCopy, handlePaste, handleDelete } = useFlowOperations(
+    nodes, edges, setNodes, setEdges,
+    undo, redo, addLog, isExecutionLocked, nodeDefs
+  );
 
   // ===========================================
-  // 4. 连接校验与辅助 (Helpers)
+  // 9. Connection validation helpers
   // ===========================================
+  const getConnectionTypeError = useCallback((
+    sourceId: string | null | undefined,
+    targetId: string | null | undefined,
+    sourceHandle: string | null | undefined,
+    targetHandle: string | null | undefined,
+  ) => {
+    const sourceNode = nodes.find(n => n.id === sourceId);
+    const targetNode = nodes.find(n => n.id === targetId);
+    if (!sourceNode || !targetNode || !targetHandle) return 'Invalid Connection';
+
+    const sourceIndex = parseInt(sourceHandle || '0');
+    const sourceType = resolveNodeOutputTypes(sourceNode.data.nodeSpec, sourceNode.data.values)[sourceIndex] || 'unknown';
+    const targetConfig = targetNode.data.nodeSpec.input?.required?.[targetHandle] || targetNode.data.nodeSpec.input?.optional?.[targetHandle];
+    const targetType = Array.isArray(targetConfig) && typeof targetConfig[0] === 'string'
+      ? targetConfig[0]
+      : 'unknown';
+
+    return canConnectPorts(sourceType, targetType).reason || 'Invalid Connection';
+  }, [nodes]);
+
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceNode = nodes.find(n => n.id === connection.source);
     const targetNode = nodes.find(n => n.id === connection.target);
@@ -113,29 +147,60 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (!sourceSpec?.output?.[sourceHandleIndex] || !targetSpec || !targetHandleName) return false;
 
-    const outputType = sourceSpec.output[sourceHandleIndex];
+    const outputTypes = resolveNodeOutputTypes(sourceSpec, sourceNode.data.values);
+    const outputType = outputTypes[sourceHandleIndex];
     const inputConfig = targetSpec.input?.required?.[targetHandleName] || targetSpec.input?.optional?.[targetHandleName];
-    if (!inputConfig) return false;
+    if (!outputType || !inputConfig) return false;
 
     const inputType = Array.isArray(inputConfig) ? inputConfig[0] : inputConfig;
-    return (inputType === '*' || outputType === '*' || outputType === inputType);
+    if (typeof inputType !== 'string') return false;
+    return canConnectPorts(outputType, inputType).ok;
   }, [nodes]);
 
   const onConnect = useCallback((params: Connection) => {
     if (isExecutionLocked) { addLog('Cannot connect while executing', 'warning'); return; }
-    if (isValidConnection(params)) {
-      setEdges(eds => addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds));
-    } else { addLog('Invalid Connection', 'error'); }
-  }, [setEdges, isValidConnection, addLog, isExecutionLocked]);
+    if (!params.targetHandle) return;
+    setEdges(eds => {
+      const existing = eds.find(e => e.target === params.target && e.targetHandle === params.targetHandle);
+      if (existing) {
+        addLog(`'${existing.targetHandle}' already connected — removing old connection`, 'info');
+        return addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds.filter(e => e.id !== existing.id));
+      }
+      if (!isValidConnection(params)) {
+        addLog(getConnectionTypeError(params.source, params.target, params.sourceHandle, params.targetHandle), 'error');
+        return eds;
+      }
+      return addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds);
+    });
+  }, [setEdges, isValidConnection, addLog, isExecutionLocked, getConnectionTypeError]);
 
   const onConnectStart: OnConnectStart = useCallback((_, { nodeId, handleId, handleType }) => {
     if (isExecutionLocked) return;
     if (handleType !== 'source') return;
     const node = nodes.find(n => n.id === nodeId);
-    if (node) setConnectingType(node.data.nodeSpec?.output?.[parseInt(handleId || '0')] || null);
+    if (node) setConnectingType(resolveNodeOutputTypes(node.data.nodeSpec, node.data.values)[parseInt(handleId || '0')] || null);
   }, [nodes, isExecutionLocked]);
 
-  const onConnectEnd: OnConnectEnd = useCallback(() => setConnectingType(null), []);
+  const onConnectEnd: OnConnectEnd = useCallback((_, connectionState) => {
+    setConnectingType(null);
+    if (
+      connectionState.isValid === false
+      && connectionState.fromNode
+      && connectionState.toNode
+      && connectionState.fromHandle
+      && connectionState.toHandle
+    ) {
+      addLog(
+        getConnectionTypeError(
+          connectionState.fromNode.id,
+          connectionState.toNode.id,
+          connectionState.fromHandle.id,
+          connectionState.toHandle.id,
+        ),
+        'error',
+      );
+    }
+  }, [addLog, getConnectionTypeError]);
 
   const addNodeAt = useCallback((type: string, position: {x: number, y: number}) => {
     if (isExecutionLocked) { addLog('Cannot add node while executing', 'warning'); return; }
@@ -162,7 +227,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [setNodes]);
 
   // ===========================================
-  // 5. Context Memoization
+  // 10. Context memoization
   // ===========================================
   const contextValue = useMemo(() => ({
     nodes, edges, nodeDefs, isConnected: isConnected, logs, workflows, activeWorkflowId,

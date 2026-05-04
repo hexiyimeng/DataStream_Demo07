@@ -233,6 +233,7 @@ export default function FlowEditor() {
       style={{ backgroundColor: 'var(--color-bg-canvas)' }}
       onDrop={onDrop}
       onDragOver={onDragOver}
+      onContextMenu={onPaneContextMenu}
     >
       {/* Empty state */}
       {nodes.length === 0 && <EmptyCanvas />}
@@ -258,12 +259,11 @@ export default function FlowEditor() {
         selectNodesOnDrag={false}
         panOnScroll={true}
         zoomOnScroll={true}
-        panOnDrag={[0, 1, 2]}
+        panOnDrag={[0, 1]}
         selectionOnDrag={false}
         minZoom={0.1}
         maxZoom={3}
         colorMode={theme === 'dark' ? 'dark' : 'light'}
-        onNodeContextMenu={onPaneContextMenu}
         onPaneContextMenu={onPaneContextMenu}
         onPaneClick={onPaneClick}
       >
