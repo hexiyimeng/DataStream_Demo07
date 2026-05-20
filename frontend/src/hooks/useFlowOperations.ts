@@ -46,11 +46,13 @@ export const useFlowOperations = (
       idMap.set(n.id, newId);
     });
 
-    // Hydrate pasted nodes with fresh specs
+    // Remap node ids before hydrating so pasted nodes get fresh ids
     cpNodes.forEach(n => {
+      const newId = idMap.get(n.id)!;
       const offsetX = 30 + Math.random() * 20;
       const offsetY = 30 + Math.random() * 20;
-      const hydrated = hydrateNodeFromSpec(n, nodeDefs, {
+      const remappedNode = { ...n, id: newId };
+      const hydrated = hydrateNodeFromSpec(remappedNode, nodeDefs, {
         x: n.position.x + offsetX,
         y: n.position.y + offsetY,
       });
@@ -58,14 +60,16 @@ export const useFlowOperations = (
       newNodes.push(hydrated);
     });
 
-    // Remap edge references
-    const newEdges = cpEdges.map(e => ({
-      ...e,
-      id: `e_${idMap.get(e.source)}-${idMap.get(e.target)}_${Math.random().toString(36).substr(2, 5)}`,
-      source: idMap.get(e.source)!,
-      target: idMap.get(e.target)!,
-      selected: true,
-    }));
+    // Remap edge references; defensively filter edges whose endpoints are not in idMap
+    const newEdges = cpEdges
+      .filter(e => idMap.has(e.source) && idMap.has(e.target))
+      .map(e => ({
+        ...e,
+        id: `e_${idMap.get(e.source)}-${idMap.get(e.target)}_${Math.random().toString(36).substr(2, 5)}`,
+        source: idMap.get(e.source)!,
+        target: idMap.get(e.target)!,
+        selected: true,
+      }));
 
     setNodes(nds => (nds.map(n => ({ ...n, selected: false } as Node<NodeData>))).concat(newNodes));
     setEdges(eds => eds.map(e => ({ ...e, selected: false })).concat(newEdges));

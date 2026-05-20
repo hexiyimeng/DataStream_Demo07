@@ -51,8 +51,10 @@ async def lifespan(app: FastAPI):
     # 启动时：初始化系统状态
     state_manager.add_log(">>> Backend Starting...", "info")
 
+    # Plugin loading must not force torch/CUDA initialization in the main
+    # process; GPU-heavy libraries stay lazy inside worker-side helpers.
     # =========================================================
-    # [关键步骤] 第一步：先加载插件代码 (Import torch/cellpose)
+    # [关键步骤] 第一步：先加载插件代码 (without torch/CUDA initialization)
     # 确保主进程在 Dask Worker 启动前完成库的加载，避免 GPU 锁死
     # =========================================================
     try:
@@ -98,13 +100,13 @@ async def lifespan(app: FastAPI):
 # ==========================================
 # 3. 创建应用实例
 # ==========================================
-app = FastAPI(title="BrainFlow Backend", lifespan=lifespan)
+app = FastAPI(title="WorkFlow Backend", lifespan=lifespan)
 
 # 配置 CORS 允许前端跨域访问
 # 允许多个开发端口：5173, 5174 等
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("BRAINFLOW_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","),
+    allow_origins=os.getenv("WorkFlow_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

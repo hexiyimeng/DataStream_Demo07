@@ -23,7 +23,7 @@ def setup_logging():
     logging.getLogger("bokeh").setLevel(logging.WARNING)
 
     # 3. 返回主 Logger
-    logger = logging.getLogger("BrainFlow")
+    logger = logging.getLogger("WorkFlow")
     logger.setLevel(logging.INFO)
     return logger
 

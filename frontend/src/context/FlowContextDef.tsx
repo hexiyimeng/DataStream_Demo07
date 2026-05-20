@@ -48,6 +48,7 @@ export interface FlowContextType {
   runFlow: () => void;
   stopFlow: () => void;
   clearLogs: () => void;
+  addLog: (message: string, level?: 'info' | 'warning' | 'error' | 'success') => void;
 
   // === Undo/Redo ===
   undo: () => void;

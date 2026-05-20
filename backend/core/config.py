@@ -3,9 +3,8 @@ import socket
 import multiprocessing
 import logging
 import platform
-import torch
 
-logger = logging.getLogger("BrainFlow.Config")
+logger = logging.getLogger("WorkFlow.Config")
 os.environ.setdefault("CELLPOSE_LOCAL_MODELS_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "models"))
 
 
@@ -91,16 +90,11 @@ class AppConfig:
         sys_mem_gb = _get_system_memory_gb()
 
         # === GPU 检测 ===
-        has_gpu = torch.cuda.is_available()
-        gpu_count = torch.cuda.device_count() if has_gpu else 0
-        gpu_vram_gb = 0
-
-        if has_gpu:
-            try:
-                total_mem = torch.cuda.get_device_properties(0).total_memory
-                gpu_vram_gb = total_mem / (1024 ** 3)
-            except Exception as e:
-                logger.debug(f"Failed to get GPU memory info: {e}")
+        # Do not probe torch/CUDA during AppConfig initialization. DaskService
+        # performs GPU detection lazily when start_cluster() is called.
+        has_gpu = False
+        gpu_count = 0
+        gpu_vram_gb = 0.0
 
         # === 打印硬件自检信息 ===
         gpu_info = f"GPU={has_gpu} (数量: {gpu_count}, 单卡VRAM: {gpu_vram_gb:.1f} GB)" if has_gpu else "GPU=False"
@@ -132,38 +126,35 @@ class AppConfig:
             auto_memory_per_worker = None
 
         # === 环境变量覆盖（按优先级递增）===
-        # BRAINFLOW_WORKERS
-        if os.getenv("BRAINFLOW_WORKERS"):
-            self.N_WORKERS = int(os.getenv("BRAINFLOW_WORKERS"))
-            logger.warning(f"   -> [Override] BRAINFLOW_WORKERS={self.N_WORKERS}")
+        # WorkFlow_WORKERS
+        if os.getenv("WorkFlow_WORKERS"):
+            self.N_WORKERS = int(os.getenv("WorkFlow_WORKERS"))
+            logger.warning(f"   -> [Override] WorkFlow_WORKERS={self.N_WORKERS}")
 
-        # BRAINFLOW_CHUNK
-        if os.getenv("BRAINFLOW_CHUNK"):
-            self.CHUNK_MULTIPLE = int(os.getenv("BRAINFLOW_CHUNK"))
-            logger.warning(f"   -> [Override] BRAINFLOW_CHUNK={self.CHUNK_MULTIPLE}")
+        # WorkFlow_CHUNK
+        if os.getenv("WorkFlow_CHUNK"):
+            self.CHUNK_MULTIPLE = int(os.getenv("WorkFlow_CHUNK"))
+            logger.warning(f"   -> [Override] WorkFlow_CHUNK={self.CHUNK_MULTIPLE}")
 
-        # BRAINFLOW_WORKER_MEMORY_LIMIT_GB（显式指定 worker 内存上限）
-        if os.getenv("BRAINFLOW_WORKER_MEMORY_LIMIT_GB"):
-            self.WORKER_MEMORY_LIMIT_GB = float(os.getenv("BRAINFLOW_WORKER_MEMORY_LIMIT_GB"))
-            logger.warning(f"   -> [Override] BRAINFLOW_WORKER_MEMORY_LIMIT_GB={self.WORKER_MEMORY_LIMIT_GB}")
+        # WorkFlow_WORKER_MEMORY_LIMIT_GB（显式指定 worker 内存上限）
+        if os.getenv("WorkFlow_WORKER_MEMORY_LIMIT_GB"):
+            self.WORKER_MEMORY_LIMIT_GB = float(os.getenv("WorkFlow_WORKER_MEMORY_LIMIT_GB"))
+            logger.warning(f"   -> [Override] WorkFlow_WORKER_MEMORY_LIMIT_GB={self.WORKER_MEMORY_LIMIT_GB}")
 
-        # BRAINFLOW_DASK_LOCAL_DIR（spill 目录）
-        if os.getenv("BRAINFLOW_DASK_LOCAL_DIR"):
-            self.DASK_LOCAL_DIR = os.getenv("BRAINFLOW_DASK_LOCAL_DIR")
-            logger.warning(f"   -> [Override] BRAINFLOW_DASK_LOCAL_DIR={self.DASK_LOCAL_DIR}")
+        # WorkFlow_DASK_LOCAL_DIR（spill 目录）
+        if os.getenv("WorkFlow_DASK_LOCAL_DIR"):
+            self.DASK_LOCAL_DIR = os.getenv("WorkFlow_DASK_LOCAL_DIR")
+            logger.warning(f"   -> [Override] WorkFlow_DASK_LOCAL_DIR={self.DASK_LOCAL_DIR}")
 
-        # BRAINFLOW_DASHBOARD_HOST
-        if os.getenv("BRAINFLOW_DASHBOARD_HOST"):
-            self.DASHBOARD_HOST = os.getenv("BRAINFLOW_DASHBOARD_HOST")
+        # WorkFlow_DASHBOARD_HOST
+        if os.getenv("WorkFlow_DASHBOARD_HOST"):
+            self.DASHBOARD_HOST = os.getenv("WorkFlow_DASHBOARD_HOST")
 
         # === 打印最终配置 ===
         mem_limit_str = f"{self.WORKER_MEMORY_LIMIT_GB:.1f} GB" if self.WORKER_MEMORY_LIMIT_GB else "auto"
         spill_str = self.DASK_LOCAL_DIR or "auto (临时目录)"
         logger.info(f" 最终生效配置: Workers={self.N_WORKERS}, ChunkMult={self.CHUNK_MULTIPLE}, "
                     f"WorkerMemLimit={mem_limit_str}, SpillDir={spill_str}")
-
-
-config = AppConfig()
 
 
 config = AppConfig()

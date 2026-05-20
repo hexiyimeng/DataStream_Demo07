@@ -42,6 +42,14 @@ export const useUndoRedo = (
     };
 
     setPast(prev => {
+      // Skip if identical to the last entry (e.g. position-only drag updates)
+      const lastEntry = prev[prev.length - 1];
+      if (lastEntry && (
+        (lastEntry.nodes === newEntry.nodes || JSON.stringify(lastEntry.nodes) === JSON.stringify(newEntry.nodes)) &&
+        lastEntry.edges === newEntry.edges
+      )) {
+        return prev;
+      }
       const newPast = [...prev, newEntry];
       return newPast.length > 30 ? newPast.slice(newPast.length - 30) : newPast;
     });
@@ -49,6 +57,14 @@ export const useUndoRedo = (
   }, []);
 
   const debouncedSaveHistoryRef = useRef<ReturnType<typeof debounce> | null>(null);
+
+  useEffect(() => {
+    // Save initial empty-canvas state on first mount so the first user action
+    // (add / delete / connect / move) is undoable with a single Ctrl+Z.
+    const stripped = serializeNodesForStorage(currentState.current.nodes);
+    setPast([{ nodes: stripped, edges: currentState.current.edges }]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally once on mount
 
   useEffect(() => {
     if (debouncedSaveHistoryRef.current) {
@@ -70,10 +86,12 @@ export const useUndoRedo = (
 
   const undo = useCallback(() => {
     setPast(prev => {
-      if (prev.length === 0) return prev;
+      // Need at least 2 entries: [oldStates..., currentState]
+      // past[last] is the current state — pop it and restore past[length-1]
+      if (prev.length <= 1) return prev;
       const newPast = [...prev];
-      const previousEntry = newPast.pop();
-      if (!previousEntry) return prev;
+      newPast.pop(); // remove current state
+      const previousEntry = newPast[newPast.length - 1]; // now the last entry is the restore target
 
       setFuture(f => [{
         nodes: serializeNodesForStorage(currentState.current.nodes),
@@ -88,8 +106,10 @@ export const useUndoRedo = (
         setEdges(validEdges);
         currentState.current = { nodes: castNodes, edges: validEdges };
       } else {
-        setNodes(currentState.current.nodes);
-        setEdges(currentState.current.edges);
+        const fallbackNodes = previousEntry.nodes as unknown as Node<NodeData>[];
+        setNodes(fallbackNodes);
+        setEdges(previousEntry.edges);
+        currentState.current = { nodes: fallbackNodes, edges: previousEntry.edges };
       }
 
       return newPast;

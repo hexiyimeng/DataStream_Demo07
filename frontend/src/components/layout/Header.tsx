@@ -87,6 +87,7 @@ export default function Header() {
     runFlow, stopFlow, setNodes, setEdges, isConnected,
     nodeDefs,
     executionState,
+    isExecuting, isExecutionLocked, addLog,
   } = useFlow();
 
   const reactFlowInstance = useReactFlow();
@@ -95,7 +96,8 @@ export default function Header() {
 
   useEffect(() => {
     if (!isConnected) return;
-    fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/dashboard_url`)
+    const apiBase = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin);
+    fetch(`${apiBase}/dashboard_url`)
       .then(r => r.json())
       .then(d => {
         if (d.dashboard_url) {
@@ -138,48 +140,51 @@ export default function Header() {
   const handleLoad = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (isExecutionLocked) {
+      alert('Cannot load workflow while execution is running.');
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (ev) => {
+      let parsed: Record<string, unknown>;
       try {
-        const raw = JSON.parse(ev.target?.result as string);
-        const flow = parseStoredFlow(raw);
-        if (!flow || !Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
-          alert('Invalid file format');
-          return;
-        }
-
-        // Clear canvas first
-        setNodes([]);
-        setEdges([]);
-
-        setTimeout(() => {
-          if (Object.keys(nodeDefs).length === 0) {
-            alert('Node definitions not loaded yet. Please wait and try again.');
-            return;
-          }
-
-          const result = hydrateFlowWithLatestSpecs(flow, nodeDefs);
-          setNodes(result.nodes);
-          setEdges(result.edges);
-
-          if (result.invalidNodeTypes.length > 0) {
-            alert(`Loaded ${result.nodes.length} nodes (${result.invalidNodeTypes.length} unavailable node type(s) marked invalid)`);
-          } else if (result.removedEdges > 0) {
-            alert(`Loaded ${result.nodes.length} nodes, removed ${result.removedEdges} invalid connection(s)`);
-          }
-
-          if (raw.workflow_name && activeWorkflowId) {
-            try { renameWorkflow(activeWorkflowId, raw.workflow_name); } catch {}
-          }
-
-          const bounds = getNodesBounds(result.nodes);
-          if (bounds && bounds.width > 0) {
-            const vp = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
-            reactFlowInstance.setViewport(vp);
-          }
-        }, 0);
+        parsed = JSON.parse(ev.target?.result as string);
       } catch (err) {
         alert(`Load failed: ${(err as Error).message}`);
+        return;
+      }
+
+      const flow = parseStoredFlow(parsed);
+      if (!flow || !Array.isArray(flow.nodes) || !Array.isArray(flow.edges)) {
+        alert('Invalid file format');
+        return;
+      }
+
+      if (Object.keys(nodeDefs).length === 0) {
+        alert('Node definitions not loaded yet. Please wait and try again.');
+        return;
+      }
+
+      const result = hydrateFlowWithLatestSpecs(flow, nodeDefs);
+      setNodes(result.nodes);
+      setEdges(result.edges);
+
+      if (result.invalidNodeTypes.length > 0) {
+        alert(`Loaded ${result.nodes.length} nodes (${result.invalidNodeTypes.length} unavailable node type(s) marked invalid)`);
+      } else if (result.removedEdges > 0) {
+        alert(`Loaded ${result.nodes.length} nodes, removed ${result.removedEdges} invalid connection(s)`);
+      }
+
+      if (parsed.workflow_name && activeWorkflowId) {
+        try { renameWorkflow(activeWorkflowId, String(parsed.workflow_name)); } catch {}
+      }
+
+      const bounds = getNodesBounds(result.nodes);
+      if (bounds && bounds.width > 0) {
+        const vp = getViewportForBounds(bounds, window.innerWidth, window.innerHeight, 0.1, 2, 0.1);
+        reactFlowInstance.setViewport(vp);
       }
     };
     reader.readAsText(file);
@@ -187,7 +192,6 @@ export default function Header() {
   };
 
   const phase = executionState.phase;
-  const isRunning = phase === 'running' || phase === 'cancelling';
   const phaseLabel = PHASE_LABELS[phase] ?? phase;
 
   return (
@@ -208,7 +212,7 @@ export default function Header() {
           className="w-8 h-8 rounded-[var(--radius-md)] flex items-center justify-center text-white font-bold text-[11px] shrink-0"
           style={{ backgroundColor: 'var(--color-accent)' }}
         >
-          BF
+          WF
         </div>
         <div className="flex flex-col">
           <span className="text-[13px] font-bold leading-tight" style={{ color: 'var(--color-text-primary)' }}>
@@ -225,10 +229,11 @@ export default function Header() {
           return (
             <div
               key={wf.id}
-              onClick={() => switchWorkflow(wf.id)}
+              onClick={() => { if (isExecutionLocked) { addLog('Cannot switch workflow while executing', 'warning'); return; } switchWorkflow(wf.id); }}
               onDoubleClick={() => { const n = prompt('Rename:', wf.name); if (n) renameWorkflow(wf.id, n.trim()); }}
               className={[
                 'group relative flex items-center gap-1.5 px-3 rounded-t-md transition-all cursor-pointer min-w-[90px] max-w-[160px] border',
+                isExecutionLocked ? 'cursor-not-allowed opacity-60' : '',
               ].join(' ')}
               style={{
                 height: isActive ? 'calc(100% + 1px)' : '28px',
@@ -259,9 +264,10 @@ export default function Header() {
         })}
         <button
           onClick={createWorkflow}
+          disabled={isExecutionLocked}
           className="h-7 w-7 flex items-center justify-center rounded transition-colors shrink-0 mt-0.5"
-          style={{ color: 'var(--color-text-muted)' }}
-          onMouseEnter={e => (e.currentTarget.style.backgroundColor = 'var(--color-bg-field-hover)')}
+          style={{ color: 'var(--color-text-muted)', opacity: isExecutionLocked ? 0.4 : 1 }}
+          onMouseEnter={e => !isExecutionLocked && (e.currentTarget.style.backgroundColor = 'var(--color-bg-field-hover)')}
           onMouseLeave={e => (e.currentTarget.style.backgroundColor = 'transparent')}
           title="New Workflow"
         >
@@ -301,15 +307,25 @@ export default function Header() {
         <div className="w-px h-5 mx-0.5" style={{ backgroundColor: 'var(--color-border-subtle)' }} />
 
         {/* Load / Save */}
-        <IconButton onClick={() => fileInputRef.current?.click()} title="Load workflow">
+        <IconButton
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isExecutionLocked}
+          title="Load workflow"
+          style={{ opacity: isExecutionLocked ? 0.4 : 1 }}
+        >
           <LoadIcon />
         </IconButton>
-        <IconButton onClick={handleSave} title="Save workflow">
+        <IconButton
+          onClick={handleSave}
+          disabled={isExecutionLocked}
+          title="Save workflow"
+          style={{ opacity: isExecutionLocked ? 0.4 : 1 }}
+        >
           <SaveIcon />
         </IconButton>
 
         {/* Run / Stop */}
-        {isRunning ? (
+        {isExecuting ? (
           <Button variant="danger" size="sm" onClick={stopFlow} icon={<StopIcon />}>
             Stop
           </Button>

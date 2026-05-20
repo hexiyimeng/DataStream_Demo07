@@ -18,7 +18,8 @@ PORT_DTYPE_TO_NUMPY = {
 }
 
 SPECIAL_DASK_DTYPES = {"any", "same"}
-SPECIAL_MODEL_PROVIDERS = {"any"}
+# MODEL port parsing remains only so old saved graphs fail with a clear
+# validation error. User graphs must use scalar model_name/model_path inputs.
 
 
 @dataclass(frozen=True)
@@ -70,17 +71,8 @@ def can_connect_types(source_type: str, target_type: str) -> Tuple[bool, Optiona
     if source.container != target.container:
         return False, f"source container {source.container} does not match target container {target.container}"
 
-    if source.container == "MODEL":
-        source_provider = source.dtype
-        target_provider = target.dtype
-
-        if target_provider in (None, "any"):
-            return True, None
-        if source_provider in (None, "any"):
-            return False, "source model provider is unknown"
-        if source_provider == target_provider:
-            return True, None
-        return False, f"source model provider {source_provider} does not match target provider {target_provider}"
+    if source.container == "MODEL" or target.container == "MODEL":
+        return False, "MODEL graph ports are deprecated and no longer supported"
 
     if source.container != "DASK_ARRAY":
         if source.raw == target.raw or source.raw == "*" or target.raw == "*":

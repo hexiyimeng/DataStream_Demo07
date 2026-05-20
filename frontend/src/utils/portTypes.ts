@@ -35,20 +35,15 @@ export function canConnectPorts(sourceType: string, targetType: string): {
   const source = parsePortType(sourceType);
   const target = parsePortType(targetType);
 
-  if (source.container !== target.container) {
-    return { ok: false, reason: mismatchMessage(sourceType, targetType) };
+  if (source.container === 'MODEL' || target.container === 'MODEL') {
+    return {
+      ok: false,
+      reason: 'MODEL graph ports are deprecated and no longer supported. Use model_name/model_path inputs on DaskCellpose instead.'
+    };
   }
 
-  if (source.container === 'MODEL') {
-    const sourceProvider = source.dtype ?? null;
-    const targetProvider = target.dtype ?? null;
-    if (targetProvider === null || targetProvider === 'any') return { ok: true };
-    if (sourceProvider === null || sourceProvider === 'any') {
-      return { ok: false, reason: mismatchMessage(sourceType, targetType) };
-    }
-    return sourceProvider === targetProvider
-      ? { ok: true }
-      : { ok: false, reason: mismatchMessage(sourceType, targetType) };
+  if (source.container !== target.container) {
+    return { ok: false, reason: mismatchMessage(sourceType, targetType) };
   }
 
   if (source.container !== 'DASK_ARRAY') {

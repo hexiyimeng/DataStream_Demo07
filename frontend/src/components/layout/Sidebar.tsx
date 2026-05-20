@@ -9,10 +9,10 @@ const CATEGORY_COLORS: Record<string, string> = {
   'Processing': '#f59e0b',
   'Transform': '#06b6d4',
   'Utils': '#94a3b8',
-  'BrainFlow/IO': '#22c55e',
-  'BrainFlow/Processing': '#3b82f6',
-  'BrainFlow/Segmentation': '#f59e0b',
-  'BrainFlow/Output': '#a78bfa',
+  'WorkFlow/IO': '#22c55e',
+  'WorkFlow/Processing': '#3b82f6',
+  'WorkFlow/Segmentation': '#f59e0b',
+  'WorkFlow/Output': '#a78bfa',
 };
 
 function getCategoryColor(category?: string): string {

@@ -23,7 +23,7 @@ def type_cast_block(block: np.ndarray, target_dtype: str, clip: bool) -> np.ndar
 
 @register_node("DaskTypeCast")
 class DaskTypeCast(BaseBlockMapNode):
-    CATEGORY = "BrainFlow/Utility"
+    CATEGORY = "WorkFlow/Utility"
     DISPLAY_NAME = "Type Cast"
 
     SKIP_EMPTY_BLOCKS = True

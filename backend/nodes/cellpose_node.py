@@ -1,60 +1,79 @@
-from __future__ import annotations
-
 import logging
+from pathlib import Path
 
-import numpy as np
-
-from core.model_ref import ModelRef
-from core.model_registry import list_models
-from core.registry import ProgressType, register_node
-from core.resources.worker_resource_manager import (
-    clear_idle_worker_resources,
-    force_clear_worker_resources,
-)
-from nodes.base import SegmentationBlockMapNode
+logger = logging.getLogger("WorkFlow.Cellpose")
 
 
-logger = logging.getLogger("BrainFlow.Cellpose")
-logging.getLogger("cellpose.models").setLevel(logging.WARNING)
 
+def create_cellpose_model(model_path: str, device: str):
+    """
+    Create a Cellpose model for ctx.model().
 
-def _coerce_model_ref(model, model_type: str | None) -> ModelRef:
-    if isinstance(model, ModelRef):
-        return model
-    if isinstance(model, dict):
-        return ModelRef.from_dict(model)
-    return ModelRef(provider="cellpose", name=model_type or "cpsam", options={})
+    ``model_path`` is expected to be an absolute local path resolved by
+    WorkFlow's model_registry. ``device`` is WorkFlow's worker device hint.
+    Heavy Cellpose/torch imports stay inside this factory to keep plugin
+    loading lightweight.
+    """
+    from cellpose import models
+    import torch
 
+    if not Path(model_path).exists():
+        raise RuntimeError(
+            f"Cellpose model path {model_path!r} does not exist. "
+            "WorkFlow requires models to be installed locally before execution."
+        )
 
-def clear_cellpose_model_cache() -> bool:
-    """Compatibility wrapper for old cleanup imports."""
+    device_obj = torch.device(device if device else "cpu")
 
-    result = clear_idle_worker_resources()
-    return not result.get("errors")
-
-
-def force_clear_cellpose_model_cache() -> int:
-    """Compatibility wrapper for old cleanup imports."""
-
-    result = force_clear_worker_resources()
-    return int(result.get("disposed", 0) or 0)
+    return models.CellposeModel(
+        gpu=(device_obj.type == "cuda"),
+        pretrained_model=model_path,
+        device=device_obj,
+    )
 
 
 def cellpose_block(
     block,
-    model=None,
-    model_type="cpsam",
+    model_name="cpsam",
     diameter=0.0,
     flow_threshold=0.4,
     cellprob_threshold=0.0,
     gpu_batch_size=8,
     ctx=None,
 ):
+    """
+    Block function for Cellpose segmentation.
+
+    Uses ctx.model(...) to get a worker-local cached Cellpose model.
+    Node authors do not manage caching or cleanup here.
+    """
     if ctx is None:
         raise RuntimeError("Cellpose block requires a BlockContext.")
 
-    model_ref = _coerce_model_ref(model, model_type)
-    cellpose_model = ctx.resources.resolve_model(model_ref)
+    model_spec = ctx.resources.get("model_spec") if ctx.resources else None
+    if not isinstance(model_spec, dict):
+        fallback_name = model_name or "cpsam"
+        model_spec = {
+            "provider": "cellpose",
+            "requested_name": fallback_name,
+            "load_name": fallback_name,
+            "clear_cuda": True,
+        }
+
+    provider = model_spec.get("provider")
+    model_name_or_path = (
+        model_spec.get("load_name")
+        or model_spec.get("requested_name")
+        or model_name
+        or "cpsam"
+    )
+
+    model = ctx.model(
+        provider=provider,
+        name=model_name_or_path,
+        factory=create_cellpose_model,
+        clear_cuda=bool(model_spec.get("clear_cuda", True)),
+    )
 
     masks = None
     flows = None
@@ -71,9 +90,6 @@ def cellpose_block(
         if diameter and diameter > 0:
             eval_kwargs["diameter"] = diameter
 
-        # Preserve existing behavior: any 3D-or-higher block is treated as a
-        # 3D spatial block. Future C/T-aware segmentation should split those
-        # axes explicitly before this node.
         if block.ndim >= 3:
             eval_kwargs["do_3D"] = True
             eval_kwargs["z_axis"] = 0
@@ -82,7 +98,7 @@ def cellpose_block(
             eval_kwargs["flow_threshold"] = flow_threshold
             eval_kwargs["cellprob_threshold"] = cellprob_threshold
 
-        masks, flows, styles = cellpose_model.eval(block, **eval_kwargs)
+        masks, flows, styles = model.eval(block, **eval_kwargs)
         return masks.astype(np.uint16, copy=False)
     finally:
         if masks is not None:
@@ -93,33 +109,34 @@ def cellpose_block(
             del styles
 
 
-@register_node("DaskCellpose")
-class DaskCellpose(SegmentationBlockMapNode):
-    CATEGORY = "BrainFlow/Segmentation"
-    DISPLAY_NAME = "Cellpose Segmentation"
-    DESCRIPTION = (
-        "Runs Cellpose block-wise. Models are represented by lightweight "
-        "ModelRef inputs and loaded lazily inside Dask workers."
-    )
-    PROGRESS_TYPE = ProgressType.CHUNK_COUNT
+import numpy as np
+from core.model_registry import list_models, resolve_model_path
+from core.registry import register_node
+from nodes.base import BaseBlockMapNode
 
+
+@register_node("DaskCellpose")
+class DaskCellpose(BaseBlockMapNode):
+    CATEGORY = "WorkFlow/Segmentation"
+    DISPLAY_NAME = "Cellpose Segmentation"
+    FAILURE_POLICY = "raise"
+
+    SKIP_EMPTY_BLOCKS = True
+    SKIP_ALL_ZERO_BLOCKS = False
     OUTPUT_DTYPE = np.uint16
 
     @classmethod
     def INPUT_TYPES(cls):
-        models = list_models("cellpose") or ["cpsam"]
-        default_model = "cpsam" if "cpsam" in models else models[0]
+        local_models = list_models("cellpose")
+        models = sorted(set(local_models))
         return {
             "required": {
                 "dask_arr": ("DASK_ARRAY[any]",),
+                "model_name": (models,),
                 "diameter": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 500.0}),
                 "flow_threshold": ("FLOAT", {"default": 0.4, "min": 0.0, "max": 1.0}),
                 "cellprob_threshold": ("FLOAT", {"default": 0.0, "min": -6.0, "max": 6.0}),
                 "gpu_batch_size": ("INT", {"default": 8, "min": 1, "max": 64}),
-            },
-            "optional": {
-                "model": ("MODEL[cellpose]",),
-                "model_type": (models, {"default": default_model, "deprecated": True}),
             },
         }
 
@@ -128,8 +145,25 @@ class DaskCellpose(SegmentationBlockMapNode):
     FUNCTION = "execute"
     PROCESS_BLOCK = cellpose_block
 
-    @classmethod
-    def REQUIRED_MODEL_REFS(cls, inputs):
-        if inputs.get("model") is not None:
-            return []
-        return [ModelRef(provider="cellpose", name=inputs.get("model_type") or "cpsam", options={})]
+    def preprocess(self, dask_arr, params: dict, runtime: dict) -> dict:
+        requested_name = params.get("model_name") or "cpsam"
+        load_name = resolve_model_path("cellpose", requested_name)
+        if not load_name:
+            raise RuntimeError(f"Model {requested_name!r} for provider 'cellpose' is not installed locally.")
+
+        logger.info(
+            "[Cellpose] requested_model=%r resolved_load_name=%r",
+            requested_name,
+            load_name,
+        )
+
+        # Serializable only. The CellposeModel object is created lazily inside
+        # the Dask worker via ctx.model(), so GraphBuilding never loads the
+        # heavy cellpose/torch model.
+        model_spec = {
+            "provider": "cellpose",
+            "requested_name": requested_name,
+            "load_name": load_name,
+            "clear_cuda": True,
+        }
+        return {"model_spec": model_spec}

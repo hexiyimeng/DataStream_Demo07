@@ -5,7 +5,6 @@ from starlette.websockets import WebSocketState
 
 from core.logger import logger
 from core.state_manager import state_manager, ExecutionStatus
-from core.auth import verify_websocket_token, _mask_token, API_KEYS
 from services.executor import execute_graph
 from services.dask_service import dask_service
 
@@ -17,19 +16,6 @@ async def websocket_endpoint(websocket: WebSocket):
     client_ip = websocket.client.host if websocket.client else "unknown"
     current_execution_id = None  # 当前客户端订阅的 execution_id
 
-    # ========== 鉴权：在 accept() 前完成 ==========
-    if API_KEYS is not None:  # 已配置 API_KEYS，需要校验
-        token = websocket.query_params.get("token") or websocket.query_params.get("api_key")
-
-        if not verify_websocket_token(token):
-            # 校验失败，记录审计日志（脱敏 token）
-            masked = _mask_token(token) if token else "(empty)"
-            logger.warning(f"WebSocket auth failed: ip={client_ip}, token={masked}")
-            # 直接拒绝连接，不 accept
-            return
-        # 校验成功
-        logger.info(f"WebSocket auth success: ip={client_ip}")
-
     # ========== accept 连接 ==========
     try:
         await asyncio.wait_for(websocket.accept(), timeout=60)
@@ -38,7 +24,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # 心跳配置
     HEARTBEAT_INTERVAL = 30  # 秒
-    IDLE_TIMEOUT = 3600  # 60分钟无活动断开 - 支持长时间运行的 Cellpose 任务
 
     # 心跳任务
     async def heartbeat():
@@ -81,7 +66,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if session and session.status in (ExecutionStatus.RUNNING, ExecutionStatus.CANCELLING):
                         has_running_task = True
 
-                timeout = IDLE_TIMEOUT if not has_running_task else 30
+                timeout = 30
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=timeout)
                 command = data.get("command")
 
@@ -91,26 +76,57 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_json({"type": "error", "message": "Received empty graph"})
                         continue
 
-                    # 生成 execution_id（支持前端传入或后端生成）
+                    # Generate or use provided execution_id
                     execution_id = data.get("executionId") or uuid.uuid4().hex
 
-                    # 创建 execution session 并订阅客户端
-                    state_manager.create_execution(execution_id)
+                    # --- Idempotent: if this execution_id is already active, subscribe only ---
+                    existing_session = state_manager.get_execution(execution_id)
+                    if existing_session and not ExecutionStatus.is_finished(existing_session.status):
+                        state_manager.subscribe_client(execution_id, websocket)
+                        current_execution_id = execution_id
+                        logger.info(f"[WebSocket] execution_id={execution_id} already active, subscribing client")
+                        await state_manager.sync_history_to_client(websocket, execution_id)
+                        await websocket.send_json({
+                            "type": "subscribed",
+                            "executionId": execution_id
+                        })
+                        continue
+
+                    # --- Active execution guard: historical executions are kept, but only
+                    # one RUNNING/CANCELLING execution may own the active slot.
+                    try:
+                        session = state_manager.start_execution(execution_id)
+                    except RuntimeError as exc:
+                        logger.warning(f"[WebSocket] execution rejected: active execution already running, "
+                                       f"client={client_ip}, requested_execution_id={execution_id}")
+                        await websocket.send_json({
+                            "type": "execution_rejected",
+                            "status": "rejected",
+                            "code": "TASK_ALREADY_RUNNING",
+                            "message": str(exc) or "Another execution is already running"
+                        })
+                        continue
+
+                    # Create execution session and subscribe client
                     state_manager.subscribe_client(execution_id, websocket)
                     current_execution_id = execution_id
 
                     logger.info(f"Executing graph for {client_ip}, execution_id={execution_id}")
 
-                    # 发送 executionId 给前端
+                    # Send executionId to frontend
                     await websocket.send_json({
                         "type": "execution_started",
                         "executionId": execution_id
                     })
 
-                    # 启动执行任务
-                    session = state_manager.get_execution(execution_id)
-                    if session:
-                        session.task = asyncio.create_task(execute_graph(graph, execution_id))
+                    # Start execution task and bind the real execute_graph task for cancellation.
+                    execution_task = asyncio.create_task(execute_graph(graph, execution_id))
+                    if not state_manager.attach_execution_task(execution_id, execution_task):
+                        execution_task.cancel()
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "Failed to bind execution task"
+                        })
 
                 elif command == "stop_execution":
                     # 只停止当前客户端的 execution
@@ -167,21 +183,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
 
             except asyncio.TimeoutError:
-                # 检查是否有任务在运行
-                current_execution_id = state_manager.get_client_execution(websocket)
-                has_running_task = False
-                if current_execution_id:
-                    session = state_manager.get_execution(current_execution_id)
-                    if session and session.status in (ExecutionStatus.RUNNING, ExecutionStatus.CANCELLING):
-                        has_running_task = True
-
-                if has_running_task:
-                    # 有任务在运行，继续等待
-                    continue
-                else:
-                    # 没有任务在运行且超时，断开连接
-                    logger.warning(f"Client {client_ip} idle timeout, closing")
-                    break
+                # 网络假活或极慢网络：跳过继续等待，不主动断开
+                logger.debug(f"Client {client_ip} socket timeout, continuing")
+                continue
 
             except WebSocketDisconnect as e:
                 # 1001 = endpoint going away (正常客户端断开)

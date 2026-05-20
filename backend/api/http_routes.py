@@ -1,28 +1,27 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from core.registry import get_node_info
-from core.auth import verify_api_key
 from services.dask_service import dask_service
 import os
 
 router = APIRouter()
 
-@router.get("/object_info", dependencies=[Depends(verify_api_key)])
+@router.get("/object_info")
 async def get_node_definitions():
     return get_node_info()
 
-@router.get("/dashboard_url", dependencies=[Depends(verify_api_key)])
+@router.get("/dashboard_url")
 async def get_dashboard_url():
     """
     获取 Dask Dashboard 的 URL。
 
     优先级：
-    1. 环境变量 BRAINFLOW_DASHBOARD_HOST（用于远程部署/反向代理场景）
+    1. 环境变量 WorkFlow_DASHBOARD_HOST（用于远程部署/反向代理场景）
     2. 原始 dashboard_link（适合本地开发）
     """
     client = dask_service.get_client()
     if client and client.dashboard_link:
         # 检查是否配置了自定义 host
-        custom_host = os.getenv("BRAINFLOW_DASHBOARD_HOST")
+        custom_host = os.getenv("WorkFlow_DASHBOARD_HOST")
         if custom_host:
             # 提取端口号并替换 host
             try:

@@ -21,7 +21,7 @@ import logging
 import time
 from typing import Optional, Dict, Any
 
-logger = logging.getLogger("BrainFlow.MemoryMonitor")
+logger = logging.getLogger("WorkFlow.MemoryMonitor")
 
 
 class MemoryMonitor:
@@ -37,6 +37,17 @@ class MemoryMonitor:
         self._has_psutil = self._check_psutil()
         self._has_torch = self._check_torch()
 
+    def reset_for_execution(self, execution_id: str):
+        """
+        Clear process-global snapshots before a new execution starts.
+
+        This singleton depends on the single-active-execution gate in
+        state_manager. If multiple active executions are restored later,
+        snapshots must become per-execution instead of process-global.
+        """
+        logger.debug(f"[MemoryMonitor] Reset snapshots for execution {execution_id}")
+        self.snapshots.clear()
+
     def _check_psutil(self) -> bool:
         """检查 psutil 是否可用"""
         try:
@@ -51,7 +62,7 @@ class MemoryMonitor:
         try:
             import torch
             return torch.cuda.is_available()
-        except ImportError:
+        except Exception:
             return False
 
     def _get_process_memory_mb(self) -> Optional[float]:
@@ -246,6 +257,11 @@ class MemoryMonitor:
 
 
 # 全局单例（便于跨函数使用）
+_memory_monitor: Optional[MemoryMonitor] = None
+
+# Process-global singleton. This is valid only while state_manager enforces one
+# active execution at a time. Multi-active execution would need per-execution
+# snapshot storage to avoid mixed diagnostics.
 _memory_monitor: Optional[MemoryMonitor] = None
 
 

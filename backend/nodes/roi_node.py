@@ -1,12 +1,11 @@
 from core.logger import logger
-from core.registry import register_node, ProgressType
+from core.registry import register_node
 
 
 @register_node("DaskROI")
 class DaskROI:
-    CATEGORY = "BrainFlow/DataProcessing"
+    CATEGORY = "WorkFlow/DataProcessing"
     DISPLAY_NAME = " ROI Crop (切块工具)"
-    PROGRESS_TYPE = ProgressType.STATE_ONLY  # 仅状态，无百分比
 
     @classmethod
     def INPUT_TYPES(cls):

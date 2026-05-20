@@ -150,11 +150,11 @@ function EmptyCanvas() {
           className="w-16 h-16 rounded-2xl flex items-center justify-center text-white font-bold text-xl mb-2"
           style={{ backgroundColor: 'var(--color-accent)', boxShadow: 'var(--shadow-elevated)' }}
         >
-          BF
+          WF
         </div>
         <div>
           <div className="text-[14px] font-semibold mb-1" style={{ color: 'var(--color-text-primary)' }}>
-            BrainFlow Workflow Editor
+            WorkFlow Editor
           </div>
           <div className="text-[12px]" style={{ color: 'var(--color-text-muted)' }}>
             Right-click on the canvas or drag nodes from the sidebar to start
@@ -195,7 +195,8 @@ export default function FlowEditor() {
     isConsoleOpen,
     addNodeAt,
     isValidConnection,
-    onConnectStart, onConnectEnd
+    onConnectStart, onConnectEnd,
+    isExecutionLocked,
   } = useFlow();
 
   const { screenToFlowPosition } = useReactFlow();
@@ -249,7 +250,7 @@ export default function FlowEditor() {
         nodeTypes={nodeTypes}
         defaultEdgeOptions={{
           type: 'default',
-          animated: true,
+          animated: false,
           style: { strokeWidth: 1.5, stroke: 'var(--color-edge)' },
         }}
         connectionMode={ConnectionMode.Loose}
@@ -266,6 +267,11 @@ export default function FlowEditor() {
         colorMode={theme === 'dark' ? 'dark' : 'light'}
         onPaneContextMenu={onPaneContextMenu}
         onPaneClick={onPaneClick}
+        nodesDraggable={!isExecutionLocked}
+        nodesConnectable={!isExecutionLocked}
+        edgesReconnectable={!isExecutionLocked}
+        elementsSelectable={!isExecutionLocked}
+        deleteKeyCode={isExecutionLocked ? null : ['Backspace', 'Delete']}
       >
         <Background
           variant={bgVariant}
@@ -289,7 +295,10 @@ export default function FlowEditor() {
           top={menu.y}
           left={menu.x}
           onClose={() => setMenu(null)}
-          onAddNode={(type) => { addNodeAt(type, menu.flowPos); }}
+          onAddNode={(type) => {
+            if (isExecutionLocked) return;
+            addNodeAt(type, menu.flowPos);
+          }}
         />
       )}
     </div>

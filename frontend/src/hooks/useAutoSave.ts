@@ -27,7 +27,7 @@ export const useAutoSave = (
 
     hasRestoredRef.current = true;
 
-    const savedData = localStorage.getItem('BRAINFLOW_AUTOSAVE');
+    const savedData = localStorage.getItem('WorkFlow_AUTOSAVE');
     if (!savedData) return;
 
     try {
@@ -60,7 +60,7 @@ export const useAutoSave = (
     const timer = setTimeout(() => {
       const stripped = serializeFlowForStorage(nodes, edges);
       const dataToSave = { ...stripped, timestamp: Date.now() };
-      localStorage.setItem('BRAINFLOW_AUTOSAVE', JSON.stringify(dataToSave));
+      localStorage.setItem('WorkFlow_AUTOSAVE', JSON.stringify(dataToSave));
     }, 1000);
     return () => clearTimeout(timer);
   }, [nodes, edges]);

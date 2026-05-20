@@ -1,7 +1,7 @@
 /**
  * workflowPersistence.ts
  *
- * Centralized hydration and serialization for BrainFlow workflow data.
+ * Centralized hydration and serialization for WorkFlow workflow data.
  *
  * Design principles:
  * - `nodeSpec` is runtime-derived from backend `/object_info`. It must NOT be
@@ -11,7 +11,7 @@
  *   `nodeDefs` using `node.data.opType` as the lookup key.
  * - Serialize only the user graph: node id, type, position, opType, values,
  *   dimensions, and edges.
- * - Strip all runtime state: nodeSpec, progress, runState, chunk counters,
+ * - Strip all runtime state: nodeSpec, runState,
  *   executionId, animated edge state, etc.
  */
 
@@ -153,17 +153,10 @@ export function hydrateNodeFromSpec(
   const baseData: NodeData = {
     opType: opType ?? '',
     values: serialized.data?.values ?? {},
-    progress: 0,
     message: '',
     runState: undefined,
-    progressRole: undefined,
     waitingFor: undefined,
     device: undefined,
-    totalChunks: undefined,
-    processedChunks: undefined,
-    completedInferenceChunks: undefined,
-    skippedChunks: undefined,
-    failedChunks: undefined,
     executionId: undefined,
     _invalid: false,
     _warning: undefined,
@@ -196,7 +189,7 @@ export function hydrateNodeFromSpec(
 
 /**
  * Convert deserialized nodes (with no runtime data) into fully-hydrated
- * BrainFlow nodes using the latest nodeDefs.
+ * WorkFlow nodes using the latest nodeDefs.
  */
 export function hydrateNodesWithLatestSpecs(
   serializedNodes: SerializedNode[],
@@ -378,6 +371,7 @@ export function parseStoredFlow(raw: unknown): SerializedFlow | null {
       sourceHandle: edge.sourceHandle as string | null,
       targetHandle: edge.targetHandle as string | null,
       type: edge.type as string | undefined,
+      animated: false,
     };
   }).filter(Boolean) as Edge[] : [];
 

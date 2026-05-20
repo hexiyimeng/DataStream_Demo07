@@ -1,9 +1,19 @@
 """
-Base node abstractions for BrainFlow.
+Base node abstractions for WorkFlow.
 
-BaseBlockMapNode: Abstract base for nodes that process each Dask block independently.
+BaseMapBlockNode: Unified lifecycle for nodes that process each Dask block independently.
 """
 
-from nodes.base.block_map import BaseBlockMapNode, BlockContext, BlockResources, SegmentationBlockMapNode
+from nodes.base.block_map import (
+    BaseBlockMapNode,
+    BaseMapBlockNode,
+    BlockContext,
+    BlockResources,
+)
 
-__all__ = ["BaseBlockMapNode", "BlockContext", "BlockResources", "SegmentationBlockMapNode"]
+__all__ = [
+    "BaseBlockMapNode",
+    "BaseMapBlockNode",
+    "BlockContext",
+    "BlockResources",
+]

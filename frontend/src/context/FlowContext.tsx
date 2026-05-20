@@ -75,12 +75,39 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useAutoSave(nodes, edges, setNodes, setEdges, nodeDefs);
 
   // ===========================================
-  // 5. Workflows — stored as stripped nodes, hydrated on switch
+  // 5. Derived execution state — must precede workflow wrappers
+  // ===========================================
+  const isExecuting = executionState.phase === 'graph_building'
+    || executionState.phase === 'submitted'
+    || executionState.phase === 'running'
+    || executionState.phase === 'cancelling';
+  const isCancelling = executionState.phase === 'cancelling';
+  const isExecutionLocked = isExecuting;
+  const isConnected = websocketStatus === 'connected';
+
+  // ===========================================
+  // 6. Workflows — stored as stripped nodes, hydrated on switch
   // ===========================================
   const {
-    workflows, activeWorkflowId, createWorkflow, switchWorkflow,
-    deleteWorkflow, renameWorkflow, saveCurrentWorkflow
+    workflows, activeWorkflowId, createWorkflow: _createWorkflow, switchWorkflow: _switchWorkflow,
+    deleteWorkflow: _deleteWorkflow, renameWorkflow, saveCurrentWorkflow
   } = useWorkflows(nodes, edges, setNodes, setEdges, nodeDefs, addLog);
+
+  // Wrap workflow ops with execution lock
+  const createWorkflow = useCallback(() => {
+    if (isExecutionLocked) { addLog('Cannot create workflow while executing', 'warning'); return; }
+    _createWorkflow();
+  }, [isExecutionLocked, addLog, _createWorkflow]);
+
+  const switchWorkflow = useCallback((id: string) => {
+    if (isExecutionLocked) { addLog('Cannot switch workflow while executing', 'warning'); return; }
+    _switchWorkflow(id);
+  }, [isExecutionLocked, addLog, _switchWorkflow]);
+
+  const deleteWorkflow = useCallback((id: string) => {
+    if (isExecutionLocked) { addLog('Cannot delete workflow while executing', 'warning'); return; }
+    _deleteWorkflow(id);
+  }, [isExecutionLocked, addLog, _deleteWorkflow]);
 
   // ===========================================
   // 6. Snapshot trigger — only on non-running state changes
@@ -94,15 +121,8 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [nodes, edges, syncCurrentState, takeSnapshot]);
 
   // ===========================================
-  // 7. Derived execution state
+  // 7. Snapshot trigger — only on non-running state changes
   // ===========================================
-  const isExecuting = executionState.phase === 'graph_building'
-    || executionState.phase === 'submitted'
-    || executionState.phase === 'running'
-    || executionState.phase === 'cancelling';
-  const isCancelling = executionState.phase === 'cancelling';
-  const isExecutionLocked = isExecuting;
-  const isConnected = websocketStatus === 'connected';
 
   // ===========================================
   // 8. Flow operations — paste hydrates with fresh specs
@@ -160,17 +180,15 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const onConnect = useCallback((params: Connection) => {
     if (isExecutionLocked) { addLog('Cannot connect while executing', 'warning'); return; }
     if (!params.targetHandle) return;
+    if (!isValidConnection(params)) {
+      addLog(getConnectionTypeError(params.source, params.target, params.sourceHandle, params.targetHandle), 'error');
+      return;
+    }
     setEdges(eds => {
-      const existing = eds.find(e => e.target === params.target && e.targetHandle === params.targetHandle);
-      if (existing) {
-        addLog(`'${existing.targetHandle}' already connected — removing old connection`, 'info');
-        return addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds.filter(e => e.id !== existing.id));
-      }
-      if (!isValidConnection(params)) {
-        addLog(getConnectionTypeError(params.source, params.target, params.sourceHandle, params.targetHandle), 'error');
-        return eds;
-      }
-      return addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, eds);
+      const withoutExisting = eds.filter(
+        e => !(e.target === params.target && e.targetHandle === params.targetHandle)
+      );
+      return addEdge({ ...params, animated: false, style: { stroke: '#94a3b8', strokeWidth: 2 } }, withoutExisting);
     });
   }, [setEdges, isValidConnection, addLog, isExecutionLocked, getConnectionTypeError]);
 
@@ -214,7 +232,6 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
         opType: type,
         nodeSpec: spec,
         values: {},
-        progress: 0,
         message: '',
       }
     }));
@@ -239,7 +256,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     isExecutionLocked,
     setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
     addNode, addNodeAt, updateNodeData,
-    runFlow, stopFlow, clearLogs,
+    runFlow, stopFlow, clearLogs, addLog,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,
     theme, toggleTheme, isConsoleOpen, toggleConsole,
     isValidConnection, undo, redo,
@@ -250,7 +267,7 @@ export const FlowProvider: React.FC<{ children: React.ReactNode }> = ({ children
     theme, isConsoleOpen, connectingType,
     executionState, websocketStatus, isExecuting, isCancelling, isExecutionLocked,
     setNodes, setEdges, onNodesChange, onEdgesChange, onConnect,
-    addNode, addNodeAt, updateNodeData, runFlow, stopFlow, clearLogs,
+    addNode, addNodeAt, updateNodeData, runFlow, stopFlow, clearLogs, addLog,
     createWorkflow, switchWorkflow, deleteWorkflow, renameWorkflow, saveCurrentWorkflow,
     toggleTheme, toggleConsole, isValidConnection, undo, redo,
     onConnectStart, onConnectEnd, handleCopy, handlePaste, handleDelete,

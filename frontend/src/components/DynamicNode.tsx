@@ -27,11 +27,11 @@ function getTypeColor(type: string): string {
 
 // Category → accent strip color
 const CATEGORY_COLORS: Record<string, string> = {
-  'BrainFlow/IO': '#22c55e',
-  'BrainFlow/Processing': '#3b82f6',
-  'BrainFlow/Segmentation': '#f59e0b',
-  'BrainFlow/Models': '#f59e0b',
-  'BrainFlow/Output': '#a78bfa',
+  'WorkFlow/IO': '#22c55e',
+  'WorkFlow/Processing': '#3b82f6',
+  'WorkFlow/Segmentation': '#f59e0b',
+  'WorkFlow/Models': '#f59e0b',
+  'WorkFlow/Output': '#a78bfa',
   'Image': '#3b82f6',
   'Loader': '#22c55e',
   'Output': '#a78bfa',
@@ -335,7 +335,7 @@ const ControlWidget = ({ name, config, value, onChange, disabled = false }: Cont
 // 4. DynamicNode — main component
 // ==========================================
 const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
-  const { nodeSpec, values = {}, progress, message, _invalid, _warning, runState, waitingFor, progressRole } = data || {};
+  const { nodeSpec, values = {}, message, _invalid, _warning, runState, waitingFor } = data || {};
   const { isExecutionLocked, updateNodeData } = useFlow();
   const locked = isExecutionLocked ?? false;
   const [collapsed, setCollapsed] = useState(false);
@@ -348,11 +348,6 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
 
   // --- Status ---
   const status: NodeStatus = runState ?? 'idle';
-  const progressValue = progress ?? 0;
-  // 只有 chunk_sink（Writer）和 stage_sink（DaskStats）这类终点节点才显示进度条
-  // chunk_intermediate（Cellpose 等中间节点）不显示进度条
-  const showPercentage = (progressRole === 'chunk_sink' || progressRole === 'stage_sink') && progress !== null;
-
   const hasFooter = status !== 'idle' && status !== 'ready';
   const accentColor = getCategoryAccent(nodeSpec?.category);
   const isOutputNode = nodeSpec?.output_node === true;
@@ -361,13 +356,12 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
   const footerMessage = useMemo(() => {
     if (status === 'submitted') return 'Queued';
     if (status === 'running' && waitingFor?.length) return `Waiting for ${waitingFor[0]}${waitingFor.length > 1 ? ` +${waitingFor.length - 1}` : ''}`;
-    if (status === 'running' && progress !== null) return message || 'Running...';
+    if (status === 'running') return message || 'Running...';
     if (status === 'done') return 'Completed';
     if (status === 'failed') return message || 'Failed';
     if (status === 'cancelled') return 'Cancelled';
-    if (showPercentage) return message || 'Running...';
     return message || '';
-  }, [status, waitingFor, progress, message, showPercentage]);
+  }, [status, waitingFor, message]);
 
   // --- Parse IO & widgets ---
   const { linkInputs, widgets, outputs } = useMemo(() => {
@@ -381,11 +375,12 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
       if (!config) return;
       const [rawType, rawOptions] = config as [string | string[], Record<string, unknown>?];
       const isDropdown = Array.isArray(rawType);
-      const hasOptions = rawOptions && typeof rawOptions === 'object';
       const isPrimitive = typeof rawType === 'string' && ['INT', 'FLOAT', 'STRING', 'BOOLEAN', 'LONG'].includes(rawType);
-      if (isDropdown || hasOptions || isPrimitive) {
+      // Widgets: primitives (INT/FLOAT/STRING/BOOLEAN/LONG) or explicit dropdowns
+      if (isPrimitive || isDropdown) {
         wids.push({ name, config: [rawType, rawOptions] });
       } else if (typeof rawType === 'string') {
+        // Non-primitive types (DASK_ARRAY, ZARR, etc.) are always link inputs, even if they have options
         links.push({ name, type: rawType, color: getTypeColor(rawType) });
       }
     });
@@ -426,7 +421,6 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
             ? 'border-[var(--color-accent)] shadow-[0_0_0_1px_var(--color-accent),var(--shadow-node-selected)]'
             : 'border-[var(--color-node-border)] shadow-[var(--shadow-node)] hover:shadow-[var(--shadow-node-hover)]',
           _invalid ? 'border-[var(--color-warning)]' : '',
-          status === 'running' ? 'node-running-pulse' : '',
         ].join(' ')}
         style={{ minWidth: 260, overflow: 'visible' }}
       >
@@ -587,38 +581,20 @@ const DynamicNode = ({ id, data, selected }: NodeProps<Node<NodeData>>) => {
         {/* ===== FOOTER ===== */}
         {hasFooter && (
           <div className="mt-auto rounded-b-[var(--radius-lg)] overflow-hidden">
-            {/* Progress bar */}
-            {showPercentage && (
-              <div className="h-[3px] bg-[var(--color-bg-field)] w-full overflow-hidden relative">
-                <div
-                  className="h-full bg-[var(--color-accent)] transition-all duration-300 relative"
-                  style={{ width: `${progressValue}%` }}
-                />
-                {status === 'running' && (
-                  <div className="absolute inset-0 animate-shimmer" />
-                )}
-              </div>
-            )}
-
             {/* Status row */}
             <div className={[
               'px-3 py-1.5 flex items-center justify-between',
               'border-t border-[var(--color-border-subtle)]',
               'bg-[var(--color-node-header)]',
               'text-[10px] font-mono',
-              !showPercentage || collapsed ? 'justify-center' : '',
+              'justify-center',
             ].join(' ')}>
               <span className={[
                 'truncate max-w-[75%]',
-                !showPercentage || collapsed ? 'text-center mx-auto text-[var(--color-text-muted)]' : 'text-[var(--color-text-secondary)]',
+                'text-center mx-auto text-[var(--color-text-muted)]',
               ].join(' ')}>
                 {collapsed ? status === 'running' ? 'Running...' : STATUS_LABEL[status] : footerMessage}
               </span>
-              {showPercentage && status === 'running' && !collapsed && (
-                <span className="shrink-0 ml-2 text-[var(--color-accent)] font-semibold text-[10px]">
-                  {Math.floor(progressValue)}%
-                </span>
-              )}
             </div>
           </div>
         )}

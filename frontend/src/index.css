@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 /* ========================================================================
-   BRAINFLOW DESIGN SYSTEM — CSS CUSTOM PROPERTIES
+   WorkFlow DESIGN SYSTEM — CSS CUSTOM PROPERTIES
    Professional Scientific Workflow Node Editor
    ======================================================================== */
 
@@ -494,35 +494,6 @@ body {
 /* ========================================================================
    ANIMATIONS
    ======================================================================== */
-
-/* Node running pulse */
-.node-running-pulse {
-  animation: node-running-pulse 2.4s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
-}
-@keyframes node-running-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.4), var(--color-node-shadow); }
-  60%  { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0), var(--color-node-shadow); }
-  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0), var(--color-node-shadow); }
-}
-.node-running-pulse > .node-wrapper {
-  border-color: var(--color-accent) !important;
-}
-
-/* Progress shimmer */
-@keyframes shimmer {
-  0%   { transform: translateX(-150%); }
-  100% { transform: translateX(250%); }
-}
-.animate-shimmer {
-  animation: shimmer 1.8s infinite linear;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-.dark .animate-shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
-}
 
 /* Node collapse */
 .node-collapse-wrapper {
